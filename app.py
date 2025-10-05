@@ -317,9 +317,17 @@ elif st.session_state.page == "chat":
             inputs["csv"] = csv_text
             st.session_state.attach_csv_next_message = False
 
+        # Ensure the LLM actually sees the CSV: include a short marker and the CSV head in the query
+        query_text = user_input
+        if "csv" in inputs and inputs["csv"]:
+            # keep the query reasonably concise but include the CSV head so the model can reference it
+            csv_preview = inputs["csv"]
+            # Optionally trim preview to avoid extremely long queries (here we keep it as-is since truncated already)
+            query_text = f"{user_input}\n\n[ATTACHED_CSV - first {len(truncated)} rows]\n{csv_preview}"
+
         payload = {
             "inputs": inputs,
-            "query": user_input,
+            "query": query_text,
             "user": st.session_state.name,
             "conversation_id": st.session_state.cid,
             "response_mode": "blocking",
