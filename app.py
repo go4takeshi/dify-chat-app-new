@@ -389,8 +389,23 @@ elif st.session_state.page == "chat":
             df_log = pd.DataFrame(st.session_state.messages)
             csv_bytes = df_log.to_csv(index=False).encode("utf-8-sig")
 
-            st.caption("キーワード分割時の最大列数を指定（デフォルト100、上限150）")
-            max_kw_ui = st.slider("最大キーワード数", min_value=1, max_value=150, value=100)
+            # detect actual maximum number of keywords present in assistant messages
+            max_present = 0
+            for m in st.session_state.messages:
+                if m.get("role") == "assistant":
+                    kws = [k.strip() for k in str(m.get("content", "")).splitlines() if k.strip()]
+                    if len(kws) > max_present:
+                        max_present = len(kws)
+
+            # determine slider upper bound: at least 1, capped at 150
+            slider_max = max(1, min(150, max_present))
+            default_val = min(100, slider_max)
+            if max_present == 0:
+                st.caption("キーワード分割時の最大列数を指定（履歴内に検出されたキーワードはありません。デフォルト値を使用してください。）")
+            else:
+                st.caption(f"キーワード分割時の最大列数を指定（検出された最大: {max_present}、デフォルト {default_val}、上限 150）")
+
+            max_kw_ui = st.slider("最大キーワード数", min_value=1, max_value=slider_max, value=default_val)
 
             download_format = st.radio("ダウンロード形式を選択", ("通常", "キーワード分割"), index=0, horizontal=True)
 
