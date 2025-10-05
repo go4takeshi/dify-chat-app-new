@@ -166,6 +166,8 @@ def init_session_state():
     st.session_state.uploaded_csv_df = None
     st.session_state.uploaded_csv_name = ""
     st.session_state.attach_csv_next_message = False
+    # default number of CSV rows to attach when including CSV in a message
+    st.session_state.csv_attach_rows = 100
 
 
 if "page" not in st.session_state:
@@ -259,8 +261,16 @@ elif st.session_state.page == "chat":
                 st.session_state.uploaded_csv_name = getattr(uploaded_csv, "name", "uploaded.csv")
                 st.success(f"CSVを読み込みました: {st.session_state.uploaded_csv_name} ({len(df)} 行)")
                 st.dataframe(df.head(10))
+                # let the user choose how many head rows to attach (cap 1000 for safety)
+                max_cap = min(1000, max(1, len(df)))
+                st.session_state.csv_attach_rows = st.slider(
+                    "チャットに含めるCSVの先頭行数",
+                    min_value=1,
+                    max_value=max_cap,
+                    value=st.session_state.get("csv_attach_rows", 100),
+                )
                 st.session_state.attach_csv_next_message = st.checkbox(
-                    "次のメッセージにこのCSVの内容を含める（先頭100行まで）",
+                    f"次のメッセージにこのCSVの内容を含める（先頭{st.session_state.csv_attach_rows}行まで）",
                     value=st.session_state.get("attach_csv_next_message", False)
                 )
             except Exception as e:
@@ -309,7 +319,8 @@ elif st.session_state.page == "chat":
         inputs = {}
         if st.session_state.get("attach_csv_next_message") and st.session_state.get("uploaded_csv_df") is not None:
             df = st.session_state.uploaded_csv_df
-            truncated = df.head(100)
+            n = st.session_state.get("csv_attach_rows", 100)
+            truncated = df.head(n)
             try:
                 csv_text = truncated.to_csv(index=False)
             except Exception:
