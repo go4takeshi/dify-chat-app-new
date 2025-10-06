@@ -291,7 +291,7 @@ elif st.session_state.page == "chat":
             # Middle: checkbox to attach CSV to next message (unified control)
             with cols[1]:
                 st.session_state.attach_csv_next_message = st.checkbox(
-                    "次のメッセージにこのCSVを添付する",
+                    f"次のメッセージにこのCSVを添付する（先頭{st.session_state.get('csv_attach_rows', 100)}行）",
                     value=st.session_state.get("attach_csv_next_message", False)
                 )
 
