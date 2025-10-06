@@ -165,6 +165,7 @@ def init_session_state():
     st.session_state.name = ""
     st.session_state.uploaded_csv_df = None
     st.session_state.uploaded_csv_name = ""
+    st.session_state.uploaded_csv_bytes = None
     st.session_state.attach_csv_next_message = False
     # default number of CSV rows to attach when including CSV in a message
     st.session_state.csv_attach_rows = 100
@@ -253,15 +254,43 @@ elif st.session_state.page == "chat":
         st.info(f"アシスタントのアバター画像（{assistant_avatar_file}）が見つかりません。カスタムアイコンを表示するには、リポジトリのルートに画像を配置してください。")
 
     with st.expander("CSVをアップロードしてチャットで利用する"):
-        uploaded_csv = st.file_uploader("CSVファイルを選択", type=["csv"] )
+        uploaded_csv = st.file_uploader("CSVファイルを選択", type=["csv"]) 
+
+        # If a new file is uploaded, read and persist it (DataFrame + raw bytes + filename)
         if uploaded_csv is not None:
             try:
-                df = pd.read_csv(uploaded_csv)
+                # read as bytes and DataFrame
+                raw_bytes = uploaded_csv.getvalue()
+                df = pd.read_csv(io.BytesIO(raw_bytes))
                 st.session_state.uploaded_csv_df = df
+                st.session_state.uploaded_csv_bytes = raw_bytes
                 st.session_state.uploaded_csv_name = getattr(uploaded_csv, "name", "uploaded.csv")
                 st.success(f"CSVを読み込みました: {st.session_state.uploaded_csv_name} ({len(df)} 行)")
                 st.dataframe(df.head(10))
-                # let the user choose how many head rows to attach (cap 1000 for safety)
+            except Exception as e:
+                st.error(f"CSVの読み込みに失敗しました: {e}")
+                st.session_state.uploaded_csv_df = None
+
+        # If a CSV is already present in session_state, show controls to reuse or clear it
+        if st.session_state.get("uploaded_csv_df") is not None:
+            df = st.session_state.uploaded_csv_df
+            name = st.session_state.get("uploaded_csv_name", "uploaded.csv")
+            st.info(f"セッションで利用可能なCSV: {name} ({len(df)} 行)")
+            st.dataframe(df.head(10))
+
+            cols = st.columns([1, 1, 2])
+            with cols[0]:
+                if st.button("このCSVを次のメッセージに添付する"):
+                    st.session_state.attach_csv_next_message = True
+                    st.success("次のメッセージにCSVを添付するよう設定しました。")
+            with cols[1]:
+                if st.button("セッションからCSVをクリア"):
+                    st.session_state.uploaded_csv_df = None
+                    st.session_state.uploaded_csv_bytes = None
+                    st.session_state.uploaded_csv_name = ""
+                    st.session_state.attach_csv_next_message = False
+                    st.success("セッション内のCSVをクリアしました。")
+            with cols[2]:
                 max_cap = min(1000, max(1, len(df)))
                 st.session_state.csv_attach_rows = st.slider(
                     "チャットに含めるCSVの先頭行数",
@@ -273,9 +302,6 @@ elif st.session_state.page == "chat":
                     f"次のメッセージにこのCSVの内容を含める（先頭{st.session_state.csv_attach_rows}行まで）",
                     value=st.session_state.get("attach_csv_next_message", False)
                 )
-            except Exception as e:
-                st.error(f"CSVの読み込みに失敗しました: {e}")
-                st.session_state.uploaded_csv_df = None
 
     # 履歴をGoogle Sheetsから読み込んで表示
     if st.session_state.cid and not st.session_state.messages:
@@ -386,28 +412,40 @@ elif st.session_state.page == "chat":
     st.markdown("---")
     if st.session_state.messages:
         try:
-            df_log = pd.DataFrame(st.session_state.messages)
+            # Choose export scope: last exchange only or entire history
+            export_scope = st.radio("ダウンロード対象を選択", ("直前のチャットのみ", "全履歴"), index=0, horizontal=True)
+
+            # Build messages_to_export based on scope
+            all_msgs = st.session_state.messages
+            if export_scope == "直前のチャットのみ":
+                # Prefer last user+assistant pair if available
+                if len(all_msgs) >= 2:
+                    messages_to_export = all_msgs[-2:]
+                else:
+                    messages_to_export = all_msgs
+            else:
+                messages_to_export = all_msgs
+
+            df_log = pd.DataFrame(messages_to_export)
             csv_bytes = df_log.to_csv(index=False).encode("utf-8-sig")
 
-            # detect actual maximum number of keywords present in assistant messages
+            # detect actual maximum number of keywords present in the export set
             max_present = 0
-            for m in st.session_state.messages:
+            for m in messages_to_export:
                 if m.get("role") == "assistant":
                     kws = [k.strip() for k in str(m.get("content", "")).splitlines() if k.strip()]
                     if len(kws) > max_present:
                         max_present = len(kws)
 
-            # determine slider upper bound: at least 1, capped at 150
-            slider_max = max(1, min(150, max_present))
-            default_val = min(100, slider_max)
-            if max_present == 0:
-                st.caption("キーワード分割時の最大列数を指定（履歴内に検出されたキーワードはありません。デフォルト値を使用してください。）")
-            else:
-                st.caption(f"キーワード分割時の最大列数を指定（検出された最大: {max_present}、デフォルト {default_val}、上限 150）")
-
-            max_kw_ui = st.slider("最大キーワード数", min_value=1, max_value=slider_max, value=default_val)
+            # Allow user to freely set the max keywords (1..1000), defaulting to detected or 100
+            default_val = max(1, min(100, max_present if max_present > 0 else 100))
+            st.caption("キーワード分割時の最大列数を指定（自由に変更可能）")
+            max_kw_ui = st.number_input("最大キーワード数", min_value=1, max_value=1000, value=default_val, step=1)
 
             download_format = st.radio("ダウンロード形式を選択", ("通常", "キーワード分割"), index=0, horizontal=True)
+
+            # filename scope identifier
+            fname_scope = "last_chat" if export_scope == "直前のチャットのみ" else "full_history"
 
             if download_format == "通常":
                 try:
@@ -415,14 +453,14 @@ elif st.session_state.page == "chat":
                     st.dataframe(df_log.head(50))
                 except Exception:
                     st.write("プレビューの表示に失敗しました（通常）。")
-                st.download_button("CSVをダウンロード", data=csv_bytes, file_name=f"chat_log_{st.session_state.cid}.csv", mime="text/csv")
+                st.download_button("CSVをダウンロード", data=csv_bytes, file_name=f"chat_log_{fname_scope}_{st.session_state.cid}.csv", mime="text/csv")
             else:
                 try:
-                    csv_kw_bytes = prepare_keyword_split_csv(st.session_state.messages, max_keywords=max_kw_ui)
+                    csv_kw_bytes = prepare_keyword_split_csv(messages_to_export, max_keywords=max_kw_ui)
                     df_preview = pd.read_csv(io.BytesIO(csv_kw_bytes))
                     st.caption("キーワード分割プレビュー: assistant の content を改行で分割して keyword_1.. に配置")
                     st.dataframe(df_preview.head(50))
-                    st.download_button("CSVをダウンロード（キーワード分割）", data=csv_kw_bytes, file_name=f"chat_log_keywords_{st.session_state.cid}.csv", mime="text/csv")
+                    st.download_button("CSVをダウンロード（キーワード分割）", data=csv_kw_bytes, file_name=f"chat_log_keywords_{fname_scope}_{st.session_state.cid}.csv", mime="text/csv")
                 except Exception as e:
                     st.warning(f"キーワード分割CSVの準備中にエラー: {e}")
         except Exception as e:
