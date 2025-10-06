@@ -279,28 +279,30 @@ elif st.session_state.page == "chat":
             st.dataframe(df.head(10))
 
             cols = st.columns([1, 1, 2])
+            # Left: clear session CSV
             with cols[0]:
-                if st.button("このCSVを次のメッセージに添付する"):
-                    st.session_state.attach_csv_next_message = True
-                    st.success("次のメッセージにCSVを添付するよう設定しました。")
-            with cols[1]:
                 if st.button("セッションからCSVをクリア"):
                     st.session_state.uploaded_csv_df = None
                     st.session_state.uploaded_csv_bytes = None
                     st.session_state.uploaded_csv_name = ""
                     st.session_state.attach_csv_next_message = False
                     st.success("セッション内のCSVをクリアしました。")
+
+            # Middle: checkbox to attach CSV to next message (unified control)
+            with cols[1]:
+                st.session_state.attach_csv_next_message = st.checkbox(
+                    "次のメッセージにこのCSVを添付する",
+                    value=st.session_state.get("attach_csv_next_message", False)
+                )
+
+            # Right: attach rows slider
             with cols[2]:
                 max_cap = min(1000, max(1, len(df)))
                 st.session_state.csv_attach_rows = st.slider(
-                    "チャットに含めるCSVの先頭行数",
+                    "添付する先頭行数",
                     min_value=1,
                     max_value=max_cap,
                     value=st.session_state.get("csv_attach_rows", 100),
-                )
-                st.session_state.attach_csv_next_message = st.checkbox(
-                    f"次のメッセージにこのCSVの内容を含める（先頭{st.session_state.csv_attach_rows}行まで）",
-                    value=st.session_state.get("attach_csv_next_message", False)
                 )
 
     # 履歴をGoogle Sheetsから読み込んで表示
