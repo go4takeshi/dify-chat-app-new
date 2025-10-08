@@ -1,40 +1,76 @@
 # -*- coding: utf-8 -*-
-import os
+"""
+Dify 連携チャット（Streamlit）- クリーン版
+--------------------------------------
+■ 特徴
+- APIキーは *すべて Secrets*（.streamlit/secrets.toml）から読み込み（ハードコード排除）
+- 新規会話の初回発話は *CID確定後に保存*（(allocating...) 行の発生を防止）
+- 同じ会話IDに複数ペルソナが混在しても、*全ペルソナ表示* に切替可能
+- 2回目の描画での *重複表示を防止*（CID確定後は Sheets のログのみを信頼）
+- Google Sheets への append は簡易リトライ（指数バックオフ）
+- すべて *ASCII 変数名*（UI表示ラベルは日本語でOK）
+
+■ 事前準備（secrets.toml 例）
+[persona_api_keys]
+"①ミノンBC理想ファン_乳児ママ_本田ゆい（30）" = "app-xxxxxxxxxxxxxxxx"
+"②ミノンBC理想ファン_乳児パパ_安西涼太（31）" = "app-yyyyyyyyyyyyyyyy"
+
+# Google サービスアカウント JSON（文字列でもTOMLテーブルでも可）
+gcp_service_account = """
+{
+  "type": "service_account",
+  "project_id": "xxxx",
+  "private_key_id": "xxxx",
+  "private_key": "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n",
+  "client_email": "xxxx@xxxx.iam.gserviceaccount.com",
+  "client_id": "1234567890",
+  "token_uri": "https://oauth2.googleapis.com/token"
+}
+"""
+
+# 対象スプレッドシート ID（chat_logs シートを自動作成）
+gsheet_id = "1AbCdEfGhIj..."
+
+# 任意：入力文字数の上限（0 なら無効）
+max_input_chars = 4000
+
+"""
+
+from __future__ import annotations
+
 import json
+import os
 import time
 from datetime import datetime, timezone
+from typing import Dict, Optional
 from urllib.parse import urlencode
 
-import requests
 import pandas as pd
+import requests
 import streamlit as st
 
-
 # =========================
-# Dify 設定
+# Constants & Secrets
 # =========================
 DIFY_CHAT_URL = "https://api.dify.ai/v1/chat-messages"
 
-# ▼▼▼ Secrets から必須情報を取得（ハードコード禁止）▼▼▼
-# persona_api_keys: { ペルソナ表示名: DifyアプリのAPIキー, ... }
+# 必須 Secrets チェック
 if "persona_api_keys" not in st.secrets:
-    st.error("Secrets に persona_api_keys が設定されていません。 .streamlit/secrets.toml を確認してください。")
+    st.error("Secrets に persona_api_keys がありません。 .streamlit/secrets.toml を設定してください。")
     st.stop()
-PERSONA_API_KEYS: dict[str, str] = dict(st.secrets["persona_api_keys"])  # 必須
-
-# Google Sheets 側の Secrets
 if "gcp_service_account" not in st.secrets:
     st.error("Secrets に gcp_service_account がありません（サービスアカウントJSON）。")
     st.stop()
 if "gsheet_id" not in st.secrets:
-    st.error("Secrets に gsheet_id がありません（対象スプレッドシートID）。")
+    st.error("Secrets に gsheet_id がありません（スプレッドシートID）。")
     st.stop()
 
-# 任意：クライアント側の入力長制限（0 なら無効）
-MAX_INPUT_CHARS = int(st.secrets.get("max_input_chars", 0))
+PERSONA_API_KEYS: Dict[str, str] = dict(st.secrets["persona_api_keys"])  # UI表示名: DifyアプリAPIキー
+GSHEET_ID: str = st.secrets["gsheet_id"]
+MAX_INPUT_CHARS: int = int(st.secrets.get("max_input_chars", 0))
 
-# アバター（ファイル名は公開情報のためこのままハードコードでOK）
-PERSONA_AVATARS = {
+# UI アバター（公開ファイル名だけを扱うのでハードコードOK）
+PERSONA_AVATARS: Dict[str, str] = {
     "①ミノンBC理想ファン_乳児ママ_本田ゆい（30）": "persona_1.jpg",
     "②ミノンBC理想ファン_乳児パパ_安西涼太（31）": "persona_2.jpg",
     "③ミノンBC理想ファン_保育園/幼稚園ママ_戸田綾香（35）": "persona_3.jpg",
@@ -47,28 +83,25 @@ PERSONA_AVATARS = {
 
 
 # =========================
-# Google Sheets 接続ユーティリティ
+# Google Sheets Utilities
 # =========================
 
-def _get_sa_dict():
-    """Secrets の gcp_service_account から dict を返す（JSON文字列/TOMLテーブル両対応）"""
+def _get_sa_dict() -> dict:
+    """Return dict from Secrets gcp_service_account (JSON string or TOML table).
+    コメントは1行で。改行・インデント混在による構文エラーを避けるため。
+    """
     raw = st.secrets["gcp_service_account"]
     if isinstance(raw, str):
         try:
             return json.loads(raw)
         except json.JSONDecodeError:
-            # private_key の実改行を 
- に自動補正して再トライ（貼付ミス救済）
-            fixed = raw.replace("
-", "
-").replace("
-", "\n")
+            # private_key の実改行を \n に自動補正して再トライ（貼付ミス救済）
+            fixed = raw.replace("\r\n", "\n").replace("\n", "\\n")
             return json.loads(fixed)
     return raw
 
 
 def _gs_client():
-    """gspread クライアントを返す"""
     import gspread
     from google.oauth2.service_account import Credentials
 
@@ -79,22 +112,17 @@ def _gs_client():
 
 
 def _open_sheet():
-    """chat_logs ワークシートを開く（なければ作成）。権限/IDエラーはUI表示して停止。"""
     import gspread
     from gspread.exceptions import SpreadsheetNotFound, WorksheetNotFound
 
     gc = _gs_client()
-    sheet_id = st.secrets["gsheet_id"]
-
     try:
-        sh = gc.open_by_key(sheet_id)  # ← 権限なし(403) or ID違い(404)で例外
+        sh = gc.open_by_key(GSHEET_ID)
     except SpreadsheetNotFound:
         st.error("スプレッドシートが見つかりません。Secrets の gsheet_id を確認してください。")
         st.stop()
     except PermissionError:
-        sa = _get_sa_dict()
-        st.error("アクセス権がありません。対象シートを下記のサービスアカウントに『編集者』で共有してください。")
-        st.code(sa.get("client_email", "(unknown)"))
+        st.error("アクセス権がありません。対象シートを Service Account に『編集者』で共有してください。")
         st.stop()
 
     try:
@@ -105,13 +133,12 @@ def _open_sheet():
     return ws
 
 
-def save_log(conversation_id: str, bot_type: str, role: str, name: str, content: str):
-    """一行追記（指数バックオフの簡易リトライ付き）"""
+def save_log(conversation_id: str, bot_type: str, role: str, name: str, content: str) -> None:
+    """Append one row with minimal retry (for transient API errors)."""
     from gspread.exceptions import APIError
 
     ws = _open_sheet()
     row = [datetime.now(timezone.utc).isoformat(), conversation_id, bot_type, role, name, content]
-
     for i in range(5):
         try:
             ws.append_row(row, value_input_option="RAW")
@@ -125,19 +152,17 @@ def save_log(conversation_id: str, bot_type: str, role: str, name: str, content:
     raise RuntimeError("Google Sheets への保存に連続失敗しました。")
 
 
-@st.cache_data(ttl=3)  # 軽めのライブ更新
-def load_history(conversation_id: str, bot_type: str | None = None) -> pd.DataFrame:
-    """会話IDの履歴。bot_type を指定すると複合キーで絞る"""
+@st.cache_data(ttl=3)
+def load_history(conversation_id: str, bot_type: Optional[str] = None) -> pd.DataFrame:
+    """Load chat history for the conversation_id; optionally filter by bot_type."""
     ws = _open_sheet()
-    data = ws.get_all_records()
+    data = ws.get_all_records()  # 既存件数が多い場合は range 指定の最適化も可
     df = pd.DataFrame(data)
     if df.empty:
         return df
-
     df = df[df["conversation_id"] == conversation_id].copy()
     if bot_type is not None and "bot_type" in df.columns:
         df = df[df["bot_type"] == bot_type].copy()
-
     if not df.empty and "timestamp" in df.columns:
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
         df = df.sort_values("timestamp")
@@ -145,20 +170,20 @@ def load_history(conversation_id: str, bot_type: str | None = None) -> pd.DataFr
 
 
 # =========================
-# Streamlit UI
+# Streamlit App
 # =========================
 st.set_page_config(page_title="Dify連携チャット（チャットフロー/グループ）", layout="centered")
 
-# 初期化
+# --- State init ---
 if "page" not in st.session_state:
     st.session_state.page = "login"
     st.session_state.cid = ""
-    st.session_state.messages = []  # 一時バッファ（CIDが確定したらクリア）
+    st.session_state.messages = []  # CID 未確定時だけ使う一時バッファ
     st.session_state.bot_type = ""
     st.session_state.user_avatar_data = None
     st.session_state.name = ""
 
-# クエリから復元（共有リンク用）
+# --- Restore from query (share link) ---
 qp = st.query_params
 if qp.get("cid") and not st.session_state.cid:
     st.session_state.cid = qp.get("cid")
@@ -169,23 +194,17 @@ if qp.get("name") and not st.session_state.name:
 if qp.get("page") and st.session_state.page != qp.get("page"):
     st.session_state.page = qp.get("page")
 
-
-# ========== STEP 1: ログイン ==========
+# ========== STEP 1: LOGIN ==========
 if st.session_state.page == "login":
     st.title("ミノンＢＣファンＡＩとチャット")
 
     with st.form("user_info_form"):
         name = st.text_input("あなたの表示名", value=st.session_state.name or "")
-
-        # 共有リンク経由などで既に cid が入っていれば選択不可にする
-        lock_bot = bool(st.session_state.cid)
-
-        # セレクトの選択肢は Secrets から
+        lock_bot = bool(st.session_state.cid)  # 共有CIDがあるならボット選択はロック
         persona_choices = list(PERSONA_API_KEYS.keys())
         if not persona_choices:
             st.error("persona_api_keys が空です。Secrets を確認してください。")
             st.stop()
-
         bot_type = st.selectbox(
             "対話するミノンＢＣファンＡＩ",
             persona_choices,
@@ -197,34 +216,29 @@ if st.session_state.page == "login":
         uploaded_file = st.file_uploader("あなたのアバター画像（任意）", type=["png", "jpg", "jpeg"])
         submitted = st.form_submit_button("チャット開始")
 
-    # フォーム外：権限チェック（キー文字列は表示しない）
+    # 権限チェック（キー文字列は表示しない）
     if st.button("Google Sheets 権限チェック", key="check_perm_login"):
         try:
-            from google.oauth2.service_account import Credentials
             import gspread
-            sa = _get_sa_dict()
-            creds = Credentials.from_service_account_info(sa, scopes=["https://www.googleapis.com/auth/spreadsheets"])
+            from google.oauth2.service_account import Credentials
+
+            creds = Credentials.from_service_account_info(_get_sa_dict(), scopes=["https://www.googleapis.com/auth/spreadsheets"])
             gc = gspread.authorize(creds)
-            gc.open_by_key(st.secrets["gsheet_id"])
+            gc.open_by_key(GSHEET_ID)
             st.success("OK: シートを開けました（共有・IDともに正しい）")
         except gspread.SpreadsheetNotFound:
             st.error("NG: gsheet_id が違うか、シートが存在しません。")
         except PermissionError:
-            st.error("NG: 権限がありません。対象のサービスアカウントを『編集者』で共有してください。")
+            st.error("NG: 権限がありません。Service Account を『編集者』で共有してください。")
         except Exception as e:
             st.error(f"権限チェック中に例外: {type(e).__name__}")
             st.exception(e)
 
-    # 送信処理
     if submitted and name:
         st.session_state.name = (name or "").strip() or "anonymous"
         st.session_state.bot_type = bot_type
         st.session_state.cid = (existing_cid or "").strip()
-        if uploaded_file is not None:
-            st.session_state.user_avatar_data = uploaded_file.getvalue()
-        else:
-            st.session_state.user_avatar_data = None
-
+        st.session_state.user_avatar_data = uploaded_file.getvalue() if uploaded_file else None
         st.session_state.messages = []
         st.query_params.update({
             "page": "chat",
@@ -234,10 +248,9 @@ if st.session_state.page == "login":
         })
         st.rerun()
 
-    # 新規会話開始ボタン（任意）
     if st.button("新しい会話を始める（会話IDをリセット）", key="new_conv_login"):
         st.session_state.page = "chat"
-        st.session_state.cid = ""  # 空で開始→Difyが新規IDを採番
+        st.session_state.cid = ""  # 空で開始→Dify が新規CIDを採番
         st.session_state.messages = []
         st.query_params.update({
             "page": "chat",
@@ -247,10 +260,9 @@ if st.session_state.page == "login":
         })
         st.rerun()
 
-
-# ========== STEP 2: チャット ==========
+# ========== STEP 2: CHAT ==========
 elif st.session_state.page == "chat":
-    # ---- 会話IDがある場合は、そのIDの元ペルソナに自動切替（履歴表示より前に） ----
+    # 共有CIDが指定されている場合、そのCIDの主ペルソナに自動切替（履歴表示前）
     if st.session_state.cid:
         try:
             df_any = load_history(st.session_state.cid, bot_type=None)
@@ -263,30 +275,30 @@ elif st.session_state.page == "chat":
                         st.session_state.bot_type = cid_bot
                         st.query_params.update({"bot": cid_bot})
         except Exception:
-            st.info("会話IDのペルソナ自動判定に失敗しました（初回や未保存時は問題ありません）。")
+            st.info("会話IDのペルソナ自動判定に失敗（初回や未保存時は問題ありません）。")
 
     st.markdown(f"#### 💬 {st.session_state.bot_type}")
     st.caption("同じ会話IDを共有すれば、全員で同じコンテキストを利用できます。")
 
-    # 権限チェックボタン（キーは表示しない）
+    # 権限チェック（キーは表示しない）
     if st.button("Google Sheets 権限チェック", key="check_perm_chat"):
         try:
-            from google.oauth2.service_account import Credentials
             import gspread
-            sa = _get_sa_dict()
-            creds = Credentials.from_service_account_info(sa, scopes=["https://www.googleapis.com/auth/spreadsheets"])
+            from google.oauth2.service_account import Credentials
+
+            creds = Credentials.from_service_account_info(_get_sa_dict(), scopes=["https://www.googleapis.com/auth/spreadsheets"])
             gc = gspread.authorize(creds)
-            gc.open_by_key(st.secrets["gsheet_id"])
+            gc.open_by_key(GSHEET_ID)
             st.success("OK: シートを開けました（共有・IDともに正しい）")
         except gspread.SpreadsheetNotFound:
             st.error("NG: gsheet_id が違うか、シートが存在しません。")
         except PermissionError:
-            st.error("NG: 権限がありません。対象のサービスアカウントを『編集者』で共有してください。")
+            st.error("NG: 権限がありません。Service Account を『編集者』で共有してください。")
         except Exception as e:
             st.error(f"権限チェック中に例外: {type(e).__name__}")
             st.exception(e)
 
-    # 共有リンク表示
+    # 共有リンク
     cid_show = st.session_state.cid or "(未発行：最初の発話で採番されます)"
     st.info(f"会話ID: `{cid_show}`")
     if st.session_state.cid:
@@ -300,7 +312,7 @@ elif st.session_state.page == "chat":
         st.code(share_link, language="text")
         st.link_button("共有リンクを開く", share_link)
 
-    # 表示オプション：全ペルソナ表示切替（任意）
+    # 表示オプション
     show_all_bots = st.checkbox("この会話IDの全ペルソナ履歴を表示する", value=False)
 
     # アバター
@@ -308,7 +320,7 @@ elif st.session_state.page == "chat":
     user_avatar = st.session_state.get("user_avatar_data") if st.session_state.get("user_avatar_data") else "👤"
     assistant_avatar = assistant_avatar_file if os.path.exists(assistant_avatar_file) else "🤖"
 
-    # 履歴（Sheets）を読み込み & 表示（複合キーで絞る）
+    # 履歴表示（CID 確定時は Sheets のみを信頼）
     if st.session_state.cid:
         try:
             df = load_history(st.session_state.cid, None if show_all_bots else st.session_state.bot_type)
@@ -321,12 +333,12 @@ elif st.session_state.page == "chat":
                 with st.chat_message(r["role"], avatar=avatar):
                     st.markdown(r["content"])
         except PermissionError:
-            st.error("Sheetsの権限がありません。上のボタンでチェックし、権限を付与してください。")
+            st.error("Sheets の権限がありません。上のボタンでチェックしてください。")
         except Exception as e:
             st.warning(f"履歴読み込みでエラー: {type(e).__name__}")
             st.exception(e)
 
-    # ローカル未保存分の表示：CID未確定のときだけ
+    # CID 未確定時のみローカルバッファを表示（重複防止）
     if not st.session_state.cid:
         for msg in st.session_state.messages:
             avatar = assistant_avatar if msg["role"] == "assistant" else user_avatar
@@ -335,25 +347,24 @@ elif st.session_state.page == "chat":
 
     # 入力
     if user_input := st.chat_input("メッセージを入力してください"):
-        # 入力長制限（任意で有効化）
+        # 入力長ガード（任意）
         if MAX_INPUT_CHARS and len(user_input) > MAX_INPUT_CHARS:
             st.error(f"入力が長すぎます（最大 {MAX_INPUT_CHARS} 文字）。短くしてください。")
         else:
-            # 画面即時反映（CID未確定時のみ）
             is_new_thread = not bool(st.session_state.cid)
+
+            # ユーザー発話の即時描画
             if is_new_thread:
+                # 新規スレッドは保存せずローカル表示に留める（後でCID確定後に保存）
                 st.session_state.messages.append({"role": "user", "content": user_input})
-                with st.chat_message("user", avatar=user_avatar):
-                    st.markdown(user_input)
             else:
-                # 既存スレはすぐ保存しても重複しない
+                # 既存スレッドはすぐに保存してよい（重複しない）
                 try:
-                    save_log(st.session_state.cid, st.session_state.bot_type,
-                             "user", st.session_state.name or "anonymous", user_input)
+                    save_log(st.session_state.cid, st.session_state.bot_type, "user", st.session_state.name or "anonymous", user_input)
                 except Exception as e:
                     st.warning(f"スプレッドシート保存に失敗（user）：{e}")
-                with st.chat_message("user", avatar=user_avatar):
-                    st.markdown(user_input)
+            with st.chat_message("user", avatar=user_avatar):
+                st.markdown(user_input)
 
             # Dify へ送信
             api_key = PERSONA_API_KEYS.get(st.session_state.bot_type)
@@ -361,12 +372,9 @@ elif st.session_state.page == "chat":
                 st.error("選択されたペルソナのAPIキーが Secrets に見つかりません。管理者に確認してください。")
                 answer = "⚠️ APIキー未設定です。"
             else:
-                headers = {
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                }
+                headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
                 payload = {
-                    "inputs": {},  # 既存の conversation_id がある場合 inputs は無視される
+                    "inputs": {},
                     "query": user_input,
                     "user": st.session_state.name or "streamlit-user",
                     "conversation_id": st.session_state.cid,
@@ -380,52 +388,40 @@ elif st.session_state.page == "chat":
                             rj = res.json()
                             answer = rj.get("answer", "⚠️ 応答がありませんでした。")
 
-                            # 新規会話IDの採番・上書き判定（アプリ不一致の保護）
+                            # 新規CIDの採番（別アプリCIDの誤上書きは拒否）
                             new_cid = rj.get("conversation_id")
-                            if (st.session_state.cid and new_cid and new_cid != st.session_state.cid):
-                                st.error(
-                                    "この会話IDは現在選択中のペルソナでは引き継げません。"
-                                    "共有元と同じペルソナ（＝同じAPIキーのアプリ）を選んでください。"
-                                )
-                                # 上書きしない
+                            if st.session_state.cid and new_cid and new_cid != st.session_state.cid:
+                                st.error("この会話IDは現在のペルソナでは引き継げません。共有元と同じペルソナを選んでください。")
                             else:
                                 if new_cid and not st.session_state.cid:
                                     st.session_state.cid = new_cid
                                     st.query_params.update({"cid": new_cid})
 
-                            # 初回分のユーザー発話を、確定したCIDで保存（遅延保存）
+                            # 初回ユーザー発話の遅延保存（CID確定後）
                             if is_new_thread:
                                 try:
-                                    save_log(st.session_state.cid or new_cid, st.session_state.bot_type,
-                                             "user", st.session_state.name or "anonymous", user_input)
+                                    save_log(st.session_state.cid or new_cid, st.session_state.bot_type, "user", st.session_state.name or "anonymous", user_input)
                                 except Exception as e:
                                     st.warning(f"初回ユーザー発話の保存に失敗：{e}")
 
                             st.markdown(answer)
                     except requests.exceptions.HTTPError as e:
                         body = getattr(e.response, "text", "")
-                        answer = f"⚠️ HTTPエラー: {e}
-
-```
-{body}
-```"
+                        answer = f"⚠️ HTTPエラー: {e}\n\n```\n{body}\n```"
                         st.markdown(answer)
                     except Exception as e:
                         answer = f"⚠️ 不明なエラー: {e}"
                         st.markdown(answer)
 
-            # メモリ & 永続化（assistant）
-            # ローカルバッファには保持せず、Sheets を正にして重複を防ぐ
+            # アシスタント発話の保存
             try:
                 save_log(st.session_state.cid, st.session_state.bot_type, "assistant", st.session_state.bot_type, answer)
             except Exception as e:
                 st.warning(f"スプレッドシート保存に失敗（assistant）：{e}")
 
-            # ★ 重複防止：CIDがあるならローカルバッファを消して次回以降はSheetsのみ描画
+            # 重複防止：CID確定後はローカルバッファをクリア
             if st.session_state.cid:
                 st.session_state.messages.clear()
-            # 必要に応じて描画更新したい場合は以下を有効化
-            # st.rerun()
 
     # 操作ボタン
     col1, col2, col3 = st.columns(3)
@@ -443,7 +439,7 @@ elif st.session_state.page == "chat":
         st.query_params.clear()
         st.rerun()
 
-# ========== フォールバック ==========
+# ========== Fallback ==========
 else:
     st.error("不正なページ指定です。")
     if st.button("最初のページに戻る"):
