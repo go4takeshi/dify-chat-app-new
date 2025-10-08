@@ -411,3 +411,8 @@ else:
         st.session_state.cid = ""
         st.query_params.clear()
         st.rerun()
+if st.button("Secrets整合性チェック"):
+    keys = [st.secrets.get(f"PERSONA_{i}_KEY") for i in range(1, 9)]
+    present = sum(1 for k in keys if isinstance(k, str) and k.startswith("app-"))
+    st.write("検出できた PERSONA_*_KEY 件数:", present)  # 期待: 8
+
