@@ -1,42 +1,30 @@
 # -*- coding: utf-8 -*-
-"""
-Dify 連携チャット（Streamlit）- クリーン版
---------------------------------------
-■ 特徴
-- APIキーは *すべて Secrets*（.streamlit/secrets.toml）から読み込み（ハードコード排除）
-- 新規会話の初回発話は *CID確定後に保存*（(allocating...) 行の発生を防止）
-- 同じ会話IDに複数ペルソナが混在しても、*全ペルソナ表示* に切替可能
-- 2回目の描画での *重複表示を防止*（CID確定後は Sheets のログのみを信頼）
-- Google Sheets への append は簡易リトライ（指数バックオフ）
-- すべて *ASCII 変数名*（UI表示ラベルは日本語でOK）
-
-■ 事前準備（secrets.toml 例）
-[persona_api_keys]
-"①ミノンBC理想ファン_乳児ママ_本田ゆい（30）" = "app-xxxxxxxxxxxxxxxx"
-"②ミノンBC理想ファン_乳児パパ_安西涼太（31）" = "app-yyyyyyyyyyyyyyyy"
-
-# Google サービスアカウント JSON（文字列でもTOMLテーブルでも可）
-gcp_service_account = """
-{
-  "type": "service_account",
-  "project_id": "xxxx",
-  "private_key_id": "xxxx",
-  "private_key": "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n",
-  "client_email": "xxxx@xxxx.iam.gserviceaccount.com",
-  "client_id": "1234567890",
-  "token_uri": "https://oauth2.googleapis.com/token"
-}
-"""
-
-# 対象スプレッドシート ID（chat_logs シートを自動作成）
-gsheet_id = "1AbCdEfGhIj..."
-
-# 任意：入力文字数の上限（0 なら無効）
-max_input_chars = 4000
-
-"""
-
-from __future__ import annotations
+# Dify 連携チャット（Streamlit）- クリーン版（Secrets対応・重複防止・初回遅延保存・ASCII変数名）
+# -----------------------------------------------------------------------------
+# ■ 事前準備（.streamlit/secrets.toml の例）
+# [persona_api_keys]
+# "①ミノンBC理想ファン_乳児ママ_本田ゆい（30）" = "app-xxxxxxxxxxxxxxxx"
+# "②ミノンBC理想ファン_乳児パパ_安西涼太（31）" = "app-yyyyyyyyyyyyyyyy"
+#
+# # Google サービスアカウント JSON（文字列でもTOMLテーブルでも可）
+# gcp_service_account = """
+# {
+#   "type": "service_account",
+#   "project_id": "xxxx",
+#   "private_key_id": "xxxx",
+#   "private_key": "-----BEGIN PRIVATE KEY-----
+...
+-----END PRIVATE KEY-----
+",
+#   "client_email": "xxxx@xxxx.iam.gserviceaccount.com",
+#   "client_id": "1234567890",
+#   "token_uri": "https://oauth2.googleapis.com/token"
+# }
+# """
+#
+# gsheet_id = "1AbCdEfGhIj..."
+# max_input_chars = 4000  # 任意（0=無効）
+# -----------------------------------------------------------------------------
 
 import json
 import os
@@ -87,16 +75,18 @@ PERSONA_AVATARS: Dict[str, str] = {
 # =========================
 
 def _get_sa_dict() -> dict:
-    """Return dict from Secrets gcp_service_account (JSON string or TOML table).
-    コメントは1行で。改行・インデント混在による構文エラーを避けるため。
-    """
+    """Secrets の gcp_service_account を dict で返す（JSON文字列/TOMLテーブル両対応）。"""
     raw = st.secrets["gcp_service_account"]
     if isinstance(raw, str):
         try:
             return json.loads(raw)
         except json.JSONDecodeError:
-            # private_key の実改行を \n に自動補正して再トライ（貼付ミス救済）
-            fixed = raw.replace("\r\n", "\n").replace("\n", "\\n")
+            # private_key の実改行を 
+ に自動補正して再トライ（貼付ミス救済）
+            fixed = raw.replace("
+", "
+").replace("
+", "\n")
             return json.loads(fixed)
     return raw
 
@@ -134,7 +124,7 @@ def _open_sheet():
 
 
 def save_log(conversation_id: str, bot_type: str, role: str, name: str, content: str) -> None:
-    """Append one row with minimal retry (for transient API errors)."""
+    """1行追記（APIの一時的エラーに対して指数バックオフ付きで再試行）。"""
     from gspread.exceptions import APIError
 
     ws = _open_sheet()
@@ -154,9 +144,9 @@ def save_log(conversation_id: str, bot_type: str, role: str, name: str, content:
 
 @st.cache_data(ttl=3)
 def load_history(conversation_id: str, bot_type: Optional[str] = None) -> pd.DataFrame:
-    """Load chat history for the conversation_id; optionally filter by bot_type."""
+    """会話IDの履歴を読み込み。bot_type 指定時は複合キーで絞込。"""
     ws = _open_sheet()
-    data = ws.get_all_records()  # 既存件数が多い場合は range 指定の最適化も可
+    data = ws.get_all_records()
     df = pd.DataFrame(data)
     if df.empty:
         return df
@@ -407,7 +397,11 @@ elif st.session_state.page == "chat":
                             st.markdown(answer)
                     except requests.exceptions.HTTPError as e:
                         body = getattr(e.response, "text", "")
-                        answer = f"⚠️ HTTPエラー: {e}\n\n```\n{body}\n```"
+                        answer = f"⚠️ HTTPエラー: {e}
+
+```
+{body}
+```"
                         st.markdown(answer)
                     except Exception as e:
                         answer = f"⚠️ 不明なエラー: {e}"
