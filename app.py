@@ -1,27 +1,12 @@
 # -*- coding: utf-8 -*-
-# Dify 連携チャット（Streamlit）- クリーン版（Secrets対応・重複防止・初回遅延保存・ASCII変数名）
+# Dify 連携チャット（Streamlit）- クリーン完全版
 # -----------------------------------------------------------------------------
-# ■ 事前準備（.streamlit/secrets.toml の例）
+# 事前準備（.streamlit/secrets.toml の例） ※このコメントはそのままにしてください（引用符は使いません）
 # [persona_api_keys]
 # "①ミノンBC理想ファン_乳児ママ_本田ゆい（30）" = "app-xxxxxxxxxxxxxxxx"
 # "②ミノンBC理想ファン_乳児パパ_安西涼太（31）" = "app-yyyyyyyyyyyyyyyy"
-#
-# # Google サービスアカウント JSON（文字列でもTOMLテーブルでも可）
-# gcp_service_account = """
-# {
-#   "type": "service_account",
-#   "project_id": "xxxx",
-#   "private_key_id": "xxxx",
-#   "private_key": "-----BEGIN PRIVATE KEY-----
-...
------END PRIVATE KEY-----
-",
-#   "client_email": "xxxx@xxxx.iam.gserviceaccount.com",
-#   "client_id": "1234567890",
-#   "token_uri": "https://oauth2.googleapis.com/token"
-# }
-# """
-#
+# # …必要なペルソナ分（← 表示名は日本語OK / 値はDifyアプリAPIキー）
+# gcp_service_account = { ... サービスアカウント JSON ... }  # TOMLテーブル or JSON文字列
 # gsheet_id = "1AbCdEfGhIj..."
 # max_input_chars = 4000  # 任意（0=無効）
 # -----------------------------------------------------------------------------
@@ -57,7 +42,7 @@ PERSONA_API_KEYS: Dict[str, str] = dict(st.secrets["persona_api_keys"])  # UI表
 GSHEET_ID: str = st.secrets["gsheet_id"]
 MAX_INPUT_CHARS: int = int(st.secrets.get("max_input_chars", 0))
 
-# UI アバター（公開ファイル名だけを扱うのでハードコードOK）
+# UI アバター（公開ファイル名）
 PERSONA_AVATARS: Dict[str, str] = {
     "①ミノンBC理想ファン_乳児ママ_本田ゆい（30）": "persona_1.jpg",
     "②ミノンBC理想ファン_乳児パパ_安西涼太（31）": "persona_2.jpg",
@@ -69,27 +54,20 @@ PERSONA_AVATARS: Dict[str, str] = {
     "⑧ミノンBC未満ファン_更年期女性_杉山紀子（51）": "persona_8.jpg",
 }
 
-
 # =========================
 # Google Sheets Utilities
 # =========================
-
 def _get_sa_dict() -> dict:
-    """Secrets の gcp_service_account を dict で返す（JSON文字列/TOMLテーブル両対応）。"""
+    # Secrets の gcp_service_account を dict で返す（JSON文字列/TOMLテーブル両対応）
     raw = st.secrets["gcp_service_account"]
     if isinstance(raw, str):
         try:
             return json.loads(raw)
         except json.JSONDecodeError:
-            # private_key の実改行を 
- に自動補正して再トライ（貼付ミス救済）
-            fixed = raw.replace("
-", "
-").replace("
-", "\n")
+            # private_key の実改行を \n に自動補正して再トライ（貼付ミス救済）
+            fixed = raw.replace("\r\n", "\n").replace("\n", "\\n")
             return json.loads(fixed)
     return raw
-
 
 def _gs_client():
     import gspread
@@ -99,7 +77,6 @@ def _gs_client():
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
     creds = Credentials.from_service_account_info(sa_info, scopes=scopes)
     return gspread.authorize(creds)
-
 
 def _open_sheet():
     import gspread
@@ -122,9 +99,8 @@ def _open_sheet():
         ws.append_row(["timestamp", "conversation_id", "bot_type", "role", "name", "content"])
     return ws
 
-
 def save_log(conversation_id: str, bot_type: str, role: str, name: str, content: str) -> None:
-    """1行追記（APIの一時的エラーに対して指数バックオフ付きで再試行）。"""
+    # 1行追記（APIの一時的エラーに対して指数バックオフ付きで再試行）
     from gspread.exceptions import APIError
 
     ws = _open_sheet()
@@ -141,10 +117,9 @@ def save_log(conversation_id: str, bot_type: str, role: str, name: str, content:
             raise
     raise RuntimeError("Google Sheets への保存に連続失敗しました。")
 
-
 @st.cache_data(ttl=3)
 def load_history(conversation_id: str, bot_type: Optional[str] = None) -> pd.DataFrame:
-    """会話IDの履歴を読み込み。bot_type 指定時は複合キーで絞込。"""
+    # 会話IDの履歴を読み込み。bot_type 指定時は複合キーで絞込。
     ws = _open_sheet()
     data = ws.get_all_records()
     df = pd.DataFrame(data)
@@ -157,7 +132,6 @@ def load_history(conversation_id: str, bot_type: Optional[str] = None) -> pd.Dat
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
         df = df.sort_values("timestamp")
     return df
-
 
 # =========================
 # Streamlit App
@@ -397,11 +371,7 @@ elif st.session_state.page == "chat":
                             st.markdown(answer)
                     except requests.exceptions.HTTPError as e:
                         body = getattr(e.response, "text", "")
-                        answer = f"⚠️ HTTPエラー: {e}
-
-```
-{body}
-```"
+                        answer = f"⚠️ HTTPエラー: {e}\n\n```\n{body}\n```"
                         st.markdown(answer)
                     except Exception as e:
                         answer = f"⚠️ 不明なエラー: {e}"
