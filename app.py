@@ -953,43 +953,66 @@ elif st.session_state.page == "chat":
                     # Google Drive保存の条件をチェック
                     has_gcp = st.secrets.get("gcp_service_account") is not None
                     has_gsheet = st.secrets.get("gsheet_id") is not None
+                    shared_drive_id = st.secrets.get("shared_drive_id")
                     
+                    # Google Drive保存の状態を表示
                     if has_gcp and has_gsheet:
-                        if st.button("💾 Drive保存", key="save_generated_image", use_container_width=True):
-                            with st.spinner("保存中..."):
-                                try:
-                                    image_id = generate_image_id()
-                                    drive_file_id, drive_link_or_error = save_image_to_drive(
-                                        st.session_state.generated_image_bytes, 
-                                        image_id, 
-                                        st.session_state.generated_image_prompt,
-                                        st.session_state.get("cid", "manual_generation")
-                                    )
-                                    
-                                    if drive_file_id:
-                                        st.success("✅ 保存完了！")
-                                        st.caption(f"ID: `{image_id}`")
-                                        if drive_link_or_error:
-                                            st.link_button("🔗 Drive表示", drive_link_or_error)
-                                        
-                                        # ログ記録
-                                        save_log(
-                                            st.session_state.get("cid", "manual_generation"),
-                                            "manual_image_generation", "system", "image_save",
-                                            f"手動画像生成: {st.session_state.generated_image_content[:100]}...",
-                                            image_id, drive_file_id, drive_link_or_error or ""
+                        if shared_drive_id:
+                            st.caption(f"📁 共有ドライブ設定: `{shared_drive_id[:20]}...`")
+                        else:
+                            st.caption("💡 共有ドライブ未設定（個人ドライブを使用）")
+                            
+                        col_save_btn, col_download = st.columns(2)
+                        
+                        with col_save_btn:
+                            if st.button("💾 Drive保存", key="save_generated_image", use_container_width=True):
+                                with st.spinner("保存中..."):
+                                    try:
+                                        image_id = generate_image_id()
+                                        drive_file_id, drive_link_or_error = save_image_to_drive(
+                                            st.session_state.generated_image_bytes, 
+                                            image_id, 
+                                            st.session_state.generated_image_prompt,
+                                            st.session_state.get("cid", "manual_generation")
                                         )
                                         
-                                        # 保存後はセッションステートをクリア
-                                        for key in ['generated_image', 'generated_image_bytes', 'generated_image_prompt', 
-                                                  'generated_image_content', 'generated_image_style', 'generated_image_size']:
-                                            if key in st.session_state:
-                                                del st.session_state[key]
-                                        st.rerun()
-                                    else:
-                                        st.error(f"❌ 保存失敗: {drive_link_or_error}")
-                                except Exception as e:
-                                    st.error(f"❌ 保存エラー: {e}")
+                                        if drive_file_id:
+                                            st.success("✅ 保存完了！")
+                                            st.caption(f"ID: `{image_id}`")
+                                            if drive_link_or_error:
+                                                st.link_button("🔗 Drive表示", drive_link_or_error)
+                                            
+                                            # ログ記録
+                                            save_log(
+                                                st.session_state.get("cid", "manual_generation"),
+                                                "manual_image_generation", "system", "image_save",
+                                                f"手動画像生成: {st.session_state.generated_image_content[:100]}...",
+                                                image_id, drive_file_id, drive_link_or_error or ""
+                                            )
+                                            
+                                            # 保存後はセッションステートをクリア
+                                            for key in ['generated_image', 'generated_image_bytes', 'generated_image_prompt', 
+                                                      'generated_image_content', 'generated_image_style', 'generated_image_size']:
+                                                if key in st.session_state:
+                                                    del st.session_state[key]
+                                            st.rerun()
+                                        else:
+                                            st.error(f"❌ 保存失敗: {drive_link_or_error}")
+                                            st.info("💡 画像は生成されています。右のダウンロードボタンをお使いください。")
+                                    except Exception as e:
+                                        st.error(f"❌ 保存エラー: {e}")
+                                        st.info("💡 画像は生成されています。右のダウンロードボタンをお使いください。")
+                        
+                        with col_download:
+                            # 画像ダウンロード機能を追加
+                            if st.download_button(
+                                label="📥 ダウンロード",
+                                data=st.session_state.generated_image_bytes,
+                                file_name=f"ai_image_{generate_image_id()}.jpg",
+                                mime="image/jpeg",
+                                use_container_width=True
+                            ):
+                                st.success("✅ ダウンロード開始！")
                         
                         # クリアボタンを追加
                         if st.button("🗑️ クリア", key="clear_generated_image", use_container_width=True):
@@ -999,7 +1022,28 @@ elif st.session_state.page == "chat":
                                     del st.session_state[key]
                             st.rerun()
                     else:
-                        st.caption("💡 Drive保存には認証設定が必要")
+                        st.caption("💡 Google Drive保存には認証設定が必要です")
+                        
+                        # Drive保存ができない場合でもダウンロードは提供
+                        col_download_only, col_clear = st.columns(2)
+                        
+                        with col_download_only:
+                            if st.download_button(
+                                label="📥 ダウンロード",
+                                data=st.session_state.generated_image_bytes,
+                                file_name=f"ai_image_{generate_image_id()}.jpg",
+                                mime="image/jpeg",
+                                use_container_width=True
+                            ):
+                                st.success("✅ ダウンロード開始！")
+                        
+                        with col_clear:
+                            if st.button("🗑️ クリア", key="clear_generated_image_no_drive", use_container_width=True):
+                                for key in ['generated_image', 'generated_image_bytes', 'generated_image_prompt', 
+                                          'generated_image_content', 'generated_image_style', 'generated_image_size']:
+                                    if key in st.session_state:
+                                        del st.session_state[key]
+                                st.rerun()
 
     # --- アバター設定 ---
     assistant_avatar_file = PERSONA_AVATARS.get(st.session_state.bot_type, "default_assistant.png")
