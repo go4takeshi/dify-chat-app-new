@@ -762,11 +762,52 @@ elif st.session_state.page == "chat":
             st.caption("⚠️ OpenAI APIキーが設定されていません")
             st.caption("画像生成機能を使用するには、Streamlit CloudのSecretsに `OPENAI_API_KEY` を設定してください。")
         else:
-            # 最新のチャット内容を取得（画像生成の元ネタ用）
-            latest_messages = st.session_state.messages[-5:] if st.session_state.messages else []
+            # 履歴がまだ読み込まれていない場合は先に読み込む
+            if st.session_state.cid and not st.session_state.messages:
+                try:
+                    history_df = load_history(st.session_state.cid)
+                    if not history_df.empty:
+                        for _, row in history_df.iterrows():
+                            st.session_state.messages.append({
+                                "role": row["role"],
+                                "content": row["content"],
+                                "name": row["name"]
+                            })
+                except Exception as e:
+                    st.caption(f"⚠️ 履歴読み込みエラー: {e}")
             
-            # 参考にするメッセージを選択
-            message_options = ["手動入力"] + [f"{msg['name']}: {msg['content'][:30]}..." for msg in latest_messages if msg['content']]
+            # 全てのチャット内容を取得（Google Sheets履歴 + 現在セッション）
+            all_messages = st.session_state.messages if st.session_state.messages else []
+            
+            # 参考にするメッセージを時系列順で選択（最新10件を表示）
+            message_options = ["手動入力"]
+            all_message_refs = {}
+            
+            # 最新10件のメッセージを時系列順で取得
+            recent_messages = all_messages[-10:] if len(all_messages) > 10 else all_messages
+            
+            for i, msg in enumerate(recent_messages):
+                # メッセージのプレビューを作成
+                content_preview = msg['content'][:35] + "..." if len(msg['content']) > 35 else msg['content']
+                
+                # 役割に応じたアイコンと名前を設定
+                if msg['role'] == 'user':
+                    icon = "👤"
+                    display_name = msg.get('name', 'ユーザー')
+                else:
+                    icon = "🤖"
+                    display_name = msg.get('name', 'AI')
+                
+                # 選択肢のキーを作成
+                option_key = f"{icon} {display_name}: {content_preview}"
+                message_options.append(option_key)
+                
+                # 実際のメッセージ内容を辞書に保存
+                all_message_refs[option_key] = msg['content']
+            
+            # 件数表示
+            if len(all_messages) > 0:
+                st.caption(f"💬 会話履歴: {len(all_messages)}件のメッセージ（最新10件を表示）")
             
             with st.form("image_generation_form"):
                 # コンパクトなレイアウト用の列
@@ -793,12 +834,11 @@ elif st.session_state.page == "chat":
                     image_content = st.text_area("画像にしたい内容", placeholder="例: 革新的な電動バイクのデザイン案", height=80)
                 else:
                     # 選択されたメッセージの内容を取得
-                    selected_index = message_options.index(reference_message) - 1
-                    if selected_index >= 0 and selected_index < len(latest_messages):
-                        auto_content = latest_messages[selected_index]['content']
+                    auto_content = all_message_refs.get(reference_message, "")
+                    if auto_content:
                         image_content = st.text_area("画像にしたい内容", value=auto_content, height=80)
                     else:
-                        image_content = ""
+                        image_content = st.text_area("画像にしたい内容", placeholder="選択されたメッセージが見つかりません", height=80)
                 
                 # サイズとボタンを横並び
                 col_size, col_btn = st.columns([1, 1])
@@ -877,16 +917,19 @@ elif st.session_state.page == "chat":
         st.info(f"アシスタントのアバター画像（{assistant_avatar_file}）が見つかりません。リポジトリのルートに画像を配置すると表示されます。")
 
     # --- 履歴表示 ---
-    # 1. Google Sheetsから履歴を読み込み
+    # Google Sheetsから履歴を読み込み（画像生成セクションで既に実行済みの場合はスキップ）
     if st.session_state.cid and not st.session_state.messages:
-        history_df = load_history(st.session_state.cid)
-        if not history_df.empty:
-            for _, row in history_df.iterrows():
-                st.session_state.messages.append({
-                    "role": row["role"],
-                    "content": row["content"],
-                    "name": row["name"]
-                })
+        try:
+            history_df = load_history(st.session_state.cid)
+            if not history_df.empty:
+                for _, row in history_df.iterrows():
+                    st.session_state.messages.append({
+                        "role": row["role"],
+                        "content": row["content"],
+                        "name": row["name"]
+                    })
+        except Exception as e:
+            st.info(f"履歴の読み込みに失敗しました: {e}")
 
     # 2. st.session_state.messages を表示
     for msg in st.session_state.messages:
