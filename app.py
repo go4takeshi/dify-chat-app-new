@@ -31,9 +31,9 @@ def get_openai_client():
 
 # ペルソナの表示名とSecretsのキーをマッピング
 PERSONA_NAMES = [
-    "①ひらめ１号_g1",
-    "②ひらめ１号_g2",
-    "③ひらめ１号_g3",
+    "①ミノンBC理想ファン_乳児ママ_本田ゆい（30）",
+    "②ミノンBC理想ファン_乳児パパ_安西涼太（31）",
+    "③ミノンBC理想ファン_保育園/幼稚園ママ_戸田綾香（35）",
 ]
 
 
@@ -68,9 +68,9 @@ PERSONA_API_KEYS = get_persona_api_keys()
 
 # アバター（ファイルが無い場合は絵文字にフォールバック）
 PERSONA_AVATARS = {
-    "①ひらめ１号_g1": "persona_1.jpg",
-    "②ひらめ１号_g2": "persona_2.jpg",
-    "③ひらめ１号_g3": "persona_3.jpg",
+    "①ミノンBC理想ファン_乳児ママ_本田ゆい（30）": "persona_1.jpg",
+    "②ミノンBC理想ファン_乳児パパ_安西涼太（31）": "persona_2.jpg",
+    "③ミノンBC理想ファン_保育園/幼稚園ママ_戸田綾香（35）": "persona_3.jpg",
 }
 
 # =========================
@@ -343,7 +343,7 @@ def load_history(conversation_id: str) -> pd.DataFrame:
 # =========================
 # Streamlit UI
 # =========================
-st.set_page_config(page_title="ひらめ１号との対話", layout="centered")
+st.set_page_config(page_title="ミノンBC AIファンチャット", layout="centered")
 
 # --- session_stateの初期化 ---
 def init_session_state():
@@ -374,7 +374,7 @@ if st.session_state.page == "login" and st.query_params.get("page") == "chat":
 
 # ========== STEP 1: ログイン画面 ==========
 if st.session_state.page == "login":
-    st.title("ひらめ１号との対話")
+    st.title("ミノンBC AIファンとの対話")
 
     # APIキーが一つも設定されていない場合はエラー表示
     if not PERSONA_API_KEYS:
@@ -388,6 +388,19 @@ if st.session_state.page == "login":
     # Google Sheets設定の確認
     if not st.secrets.get("gcp_service_account") or not st.secrets.get("gsheet_id"):
         st.info("💡 Google Sheets設定が不完全です。チャット履歴の永続化機能は無効になります。")
+    
+    # デバッグ情報の表示（Google Sheets設定確認用）
+    if st.secrets.get("gcp_service_account") and st.secrets.get("gsheet_id"):
+        with st.expander("🔧 Google Sheets設定確認", expanded=False):
+            try:
+                sa_info = json.loads(st.secrets["gcp_service_account"]) if isinstance(st.secrets["gcp_service_account"], str) else dict(st.secrets["gcp_service_account"])
+                st.write("**サービスアカウント email:**")
+                st.code(sa_info.get("client_email", "不明"))
+                st.write("**スプレッドシートID:**")
+                st.code(st.secrets["gsheet_id"])
+                st.info("上記のサービスアカウントemailを、スプレッドシートに「編集者」権限で共有してください。")
+            except Exception as e:
+                st.error(f"サービスアカウント情報の読み取りエラー: {e}")
     
     # JSON出力フォーマットの説明
     with st.expander("📖 Dify出力フォーマットについて", expanded=False):
@@ -426,7 +439,7 @@ if st.session_state.page == "login":
     with st.form("user_info_form"):
         name = st.text_input("あなたの表示名", value=st.session_state.name or "")
         bot_type = st.selectbox(
-            "対話するひらめ１号",
+            "対話するAIペルソナ",
             list(PERSONA_API_KEYS.keys()),
             index=(list(PERSONA_API_KEYS.keys()).index(st.session_state.bot_type)
                    if st.session_state.bot_type in PERSONA_API_KEYS else 0),
