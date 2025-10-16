@@ -31,9 +31,9 @@ def get_openai_client():
 
 # ペルソナの表示名とSecretsのキーをマッピング
 PERSONA_NAMES = [
-    "①ひらめ１号_g1",
-    "②ひらめ１号_g2",
-    "③ひらめ１号_g3",
+    "①ミノンBC理想ファン_乳児ママ_本田ゆい（30）",
+    "②ミノンBC理想ファン_乳児パパ_安西涼太（31）",
+    "③ミノンBC理想ファン_保育園/幼稚園ママ_戸田綾香（35）",
 ]
 
 
@@ -68,87 +68,42 @@ PERSONA_API_KEYS = get_persona_api_keys()
 
 # アバター（ファイルが無い場合は絵文字にフォールバック）
 PERSONA_AVATARS = {
-    "①ひらめ１号_g1": "persona_1.jpg",
-    "②ひらめ１号_g2": "persona_2.jpg",
-    "③ひらめ１号_g3": "persona_3.jpg",
+    "①ミノンBC理想ファン_乳児ママ_本田ゆい（30）": "persona_1.jpg",
+    "②ミノンBC理想ファン_乳児パパ_安西涼太（31）": "persona_2.jpg",
+    "③ミノンBC理想ファン_保育園/幼稚園ママ_戸田綾香（35）": "persona_3.jpg",
 }
 
 # =========================
 # JSON解析とDALL-E 3機能
 # =========================
-def parse_dify_response(response_text):
-    """Difyからの応答をパースして構造化データを返す"""
-    try:
-        # JSONとして解析を試行
-        data = json.loads(response_text)
-        
-        # 新しいスキーマ（summariesの配列）に対応
-        if "summaries" in data and isinstance(data["summaries"], list):
-            summaries = []
-            for item in data["summaries"]:
-                title = item.get("title", "")
-                summary = item.get("summary", "")
-                category = item.get("category", "")
-                image_prompt = item.get("image_prompt", "")
-                
-                # 概要が200文字を超える場合は切り詰める
-                if len(summary) > 200:
-                    summary = summary[:200] + "..."
-                
-                summaries.append({
-                    "title": title,
-                    "summary": summary,
-                    "category": category,
-                    "image_prompt": image_prompt
-                })
-            
-            return {
-                "summaries": summaries,
-                "is_json": True,
-                "is_multiple": True,
-                "raw_text": response_text
-            }
-        
-        # 旧形式（単一アイテム）にも対応
-        elif "title" in data or "summary" in data:
-            title = data.get("title", "")
-            summary = data.get("summary", "")
-            category = data.get("category", "")
-            image_prompt = data.get("image_prompt", "")
-            
-            # 概要が200文字を超える場合は切り詰める
-            if len(summary) > 200:
-                summary = summary[:200] + "..."
-                
-            return {
-                "summaries": [{
-                    "title": title,
-                    "summary": summary,
-                    "category": category,
-                    "image_prompt": image_prompt
-                }],
-                "is_json": True,
-                "is_multiple": False,
-                "raw_text": response_text
-            }
-        
-        # その他のJSON形式
-        else:
-            return {
-                "summaries": [],
-                "is_json": False,
-                "is_multiple": False,
-                "raw_text": response_text
-            }
-            
-    except json.JSONDecodeError:
-        # JSONでない場合はそのまま返す
-        return {
-            "summaries": [],
-            "is_json": False,
-            "is_multiple": False,
-            "raw_text": response_text
-        }
+def should_generate_image(user_input, bot_response):
+    """ユーザーの入力に画像生成の指示が含まれているかチェック"""
+    image_keywords = [
+        "画像にして", "画像を生成", "画像を作って", "イメージにして", "絵にして",
+        "図にして", "ビジュアル化", "画像で表現", "画像化", "絵で表現"
+    ]
+    
+    # ユーザー入力に画像生成キーワードが含まれているかチェック
+    for keyword in image_keywords:
+        if keyword in user_input:
+            return True
+    return False
+
+def create_image_prompt_from_text(text_content):
+    """テキスト内容から画像生成用のプロンプトを作成"""
+    # テキストの長さを制限（DALL-E 3のプロンプト制限対応）
+    if len(text_content) > 300:
+        text_content = text_content[:300] + "..."
+    
+    # 日本語の内容を英語の画像生成プロンプトに変換
+    # アイデアや概念的な内容を視覚化するためのプロンプト
+    prompt = f"""Create a professional, modern illustration that visually represents the following concept or idea: 
+    
+    {text_content}
+    
+    Style: Clean, minimalist, professional design with clear visual metaphors. Use bright, engaging colors. Make it suitable for business presentation or educational content."""
+    
+    return prompt
 
 def generate_image_with_dalle3(prompt):
     """DALL-E 3を使用して画像を生成"""
@@ -215,16 +170,19 @@ def save_image_to_drive(image_bytes, image_id, prompt, conversation_id):
         }
         
         # 画像をアップロード
-        from googleapiclient.http import MediaIoBaseUpload
-        media = MediaIoBaseUpload(io.BytesIO(image_bytes), mimetype='image/jpeg')
-        
-        file = drive_service.files().create(
-            body=file_metadata,
-            media_body=media,
-            fields='id,webViewLink,webContentLink'
-        ).execute()
-        
-        return file.get('id'), file.get('webViewLink')
+        try:
+            from googleapiclient.http import MediaIoBaseUpload
+            media = MediaIoBaseUpload(io.BytesIO(image_bytes), mimetype='image/jpeg')
+            
+            file = drive_service.files().create(
+                body=file_metadata,
+                media_body=media,
+                fields='id,webViewLink,webContentLink'
+            ).execute()
+            
+            return file.get('id'), file.get('webViewLink')
+        except ImportError:
+            return None, "Google API Client ライブラリが不足しています"
         
     except Exception as e:
         return None, f"Google Drive保存エラー: {e}"
@@ -260,85 +218,68 @@ def get_or_create_drive_folder(drive_service, folder_name):
         st.error(f"フォルダ操作エラー: {e}")
         return None
 
-def display_parsed_response(parsed_data):
-    """パースされたデータを適切に表示"""
-    if parsed_data["is_json"] and parsed_data["summaries"]:
-        # JSONデータの場合（複数のアイデア）
-        for i, summary_item in enumerate(parsed_data["summaries"]):
-            # 複数アイテムがある場合は区切り線を表示
-            if i > 0:
-                st.markdown("---")
+def display_response_with_conditional_image(bot_response, user_input, generate_image=False):
+    """ボットの応答を表示し、必要に応じて画像を生成"""
+    # ボットの応答テキストを表示
+    st.markdown(bot_response)
+    
+    # 画像生成が指示されている場合
+    if generate_image:
+        st.markdown("🎨 **画像を生成中...**")
+        st.info(f"テキスト内容を元に画像を生成します...")
+        
+        with st.spinner("DALL-E 3で画像を生成しています..."):
+            # テキストから画像生成用プロンプトを作成
+            image_prompt = create_image_prompt_from_text(bot_response)
+            generated_image, image_bytes = generate_image_with_dalle3(image_prompt)
             
-            # タイトル表示
-            if summary_item["title"]:
-                st.markdown(f"### {summary_item['title']}")
+        if generated_image and image_bytes:
+            st.image(generated_image, caption=f"生成画像（元テキストより）", use_container_width=True)
             
-            # カテゴリ表示
-            if summary_item["category"]:
-                st.markdown(f"**カテゴリ:** {summary_item['category']}")
-            
-            # 概要表示
-            if summary_item["summary"]:
-                st.markdown(summary_item["summary"])
-            
-            # 画像生成の指示がある場合
-            if summary_item["image_prompt"]:
-                st.markdown("🎨 **画像を生成中...**")
-                st.info(f"プロンプト: {summary_item['image_prompt']}")
-                
-                with st.spinner("DALL-E 3で画像を生成しています..."):
-                    generated_image, image_bytes = generate_image_with_dalle3(summary_item["image_prompt"])
+            # Google Driveに画像を保存
+            if st.secrets.get("gcp_service_account") and st.secrets.get("gsheet_id"):
+                with st.spinner("Google Driveに画像を保存しています..."):
+                    image_id = generate_image_id()
+                    drive_file_id, drive_link_or_error = save_image_to_drive(
+                        image_bytes, 
+                        image_id, 
+                        image_prompt,
+                        st.session_state.get("cid", "unknown")
+                    )
                     
-                if generated_image and image_bytes:
-                    st.image(generated_image, caption=f"生成画像: {summary_item['image_prompt'][:50]}...", use_container_width=True)
-                    
-                    # Google Driveに画像を保存
-                    if st.secrets.get("gcp_service_account") and st.secrets.get("gsheet_id"):
-                        with st.spinner("Google Driveに画像を保存しています..."):
-                            image_id = generate_image_id()
-                            drive_file_id, drive_link_or_error = save_image_to_drive(
-                                image_bytes, 
-                                image_id, 
-                                summary_item["image_prompt"],
-                                st.session_state.get("cid", "unknown")
-                            )
-                            
-                            if drive_file_id:
-                                st.success(f"✅ **画像をGoogle Driveに保存しました**")
-                                st.info(f"**整理番号:** `{image_id}`")
-                                if drive_link_or_error:
-                                    st.markdown(f"🔗 [Google Driveで表示]({drive_link_or_error})")
-                                
-                                # 画像情報をGoogle Sheetsに記録
-                                save_log(
-                                    st.session_state.get("cid", "unknown"),
-                                    st.session_state.get("bot_type", "unknown"),
-                                    "system",
-                                    "image_save",
-                                    f"画像保存: {summary_item['image_prompt'][:100]}...",
-                                    image_id,
-                                    drive_file_id,
-                                    drive_link_or_error or ""
-                                )
-                                
-                                # セッション状態に画像情報を保存（再表示用）
-                                if "saved_images" not in st.session_state:
-                                    st.session_state.saved_images = []
-                                st.session_state.saved_images.append({
-                                    "image_id": image_id,
-                                    "drive_link": drive_link_or_error,
-                                    "prompt": summary_item["image_prompt"]
-                                })
-                            else:
-                                st.error(f"❌ 画像保存に失敗しました: {drive_link_or_error}")
-                    else:
-                        st.info("💡 Google Drive保存機能が無効です。SecretsにGoogle認証情報を設定すると自動保存されます。")
+                    if drive_file_id:
+                        st.success(f"✅ **画像をGoogle Driveに保存しました**")
+                        st.info(f"**整理番号:** `{image_id}`")
+                        if drive_link_or_error:
+                            st.markdown(f"🔗 [Google Driveで表示]({drive_link_or_error})")
                         
-                else:
-                    st.error("画像の生成に失敗しました。")
-    else:
-        # 通常のテキストの場合
-        st.markdown(parsed_data["raw_text"])
+                        # 画像情報をGoogle Sheetsに記録
+                        save_log(
+                            st.session_state.get("cid", "unknown"),
+                            st.session_state.get("bot_type", "unknown"),
+                            "system",
+                            "image_save",
+                            f"画像保存: {bot_response[:100]}...",
+                            image_id,
+                            drive_file_id,
+                            drive_link_or_error or ""
+                        )
+                        
+                        # セッション状態に画像情報を保存（再表示用）
+                        if "saved_images" not in st.session_state:
+                            st.session_state.saved_images = []
+                        st.session_state.saved_images.append({
+                            "image_id": image_id,
+                            "drive_link": drive_link_or_error,
+                            "prompt": image_prompt
+                        })
+                    else:
+                        st.error(f"❌ 画像保存に失敗しました: {drive_link_or_error}")
+            else:
+                st.info("💡 Google Drive保存機能が無効です。SecretsにGoogle認証情報を設定すると自動保存されます。")
+                
+        else:
+            st.error("画像の生成に失敗しました。")
 
 # =========================
 # Google Sheets & Google Drive 接続ユーティリティ
@@ -384,19 +325,26 @@ def _gs_client():
 @st.cache_resource
 def _drive_service():
     """Google Drive API サービスを返す（キャッシュする）"""
-    from googleapiclient.discovery import build
-    from google.oauth2.service_account import Credentials
+    try:
+        from googleapiclient.discovery import build
+        from google.oauth2.service_account import Credentials
 
-    sa_info = _get_sa_dict()
-    if not sa_info:
+        sa_info = _get_sa_dict()
+        if not sa_info:
+            return None
+
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive.file"
+        ]
+        creds = Credentials.from_service_account_info(sa_info, scopes=scopes)
+        return build('drive', 'v3', credentials=creds)
+    except ImportError:
+        st.error("Google API Client ライブラリがインストールされていません。`pip install google-api-python-client` を実行してください。")
         return None
-
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive.file"
-    ]
-    creds = Credentials.from_service_account_info(sa_info, scopes=scopes)
-    return build('drive', 'v3', credentials=creds)
+    except Exception as e:
+        st.error(f"Google Drive API サービスの初期化に失敗しました: {e}")
+        return None
 
 def _open_sheet():
     """chat_logs ワークシートを開く（なければ作成）。権限/IDエラーはUI表示して停止。"""
@@ -528,7 +476,7 @@ if st.session_state.page == "login" and st.query_params.get("page") == "chat":
 
 # ========== STEP 1: ログイン画面 ==========
 if st.session_state.page == "login":
-    st.title("ひらめ１号との対話")
+    st.title("ミノンBC AIファンとの対話")
 
     # APIキーが一つも設定されていない場合はエラー表示
     if not PERSONA_API_KEYS:
@@ -559,6 +507,7 @@ if st.session_state.page == "login":
                 st.info("1️⃣ **Google Cloud Console**でAPI有効化:\n- Google Sheets API ✅\n- Google Drive API ✅")
                 st.info("2️⃣ **スプレッドシート共有**:\n上記のサービスアカウントemailを「編集者」権限で共有")
                 st.info("3️⃣ **Google Drive権限**:\nサービスアカウントが画像保存用フォルダを作成できます")
+                st.info("4️⃣ **依存関係**:\nrequirements.txtに`google-api-python-client>=2.100.0`が含まれています")
                 
                 # API接続テスト
                 st.markdown("### 🔍 API接続テスト")
@@ -582,44 +531,45 @@ if st.session_state.page == "login":
                             st.success("✅ Google Drive API: 接続成功")
                         else:
                             st.error("❌ Google Drive API: サービス取得失敗")
+                    except ImportError:
+                        st.error("❌ Google Drive API: google-api-python-client ライブラリがインストールされていません")
+                        st.info("📦 **インストール方法:**\n```bash\npip install google-api-python-client\n```")
                     except Exception as e:
                         st.error(f"❌ Google Drive API: 接続失敗 - {e}")
                         
             except Exception as e:
                 st.error(f"サービスアカウント情報の読み取りエラー: {e}")
     
-    # JSON出力フォーマットの説明
-    with st.expander("📖 Dify出力フォーマットについて", expanded=False):
+    # 画像生成機能の説明
+    with st.expander("🎨 画像生成機能について", expanded=False):
         st.markdown("""
-        **JSON形式での出力**
+        **画像生成機能**
         
-        Difyから以下のJSON形式で出力すると、適切にフォーマットされます：
+        チャット中に以下のキーワードを使用すると、ボットの応答内容を元に自動的に画像が生成されます：
         
-        ```json
-        {
-            "planner": {},
-            "summaries": [
-                {
-                    "title": "アイデアのタイトル",
-                    "summary": "200文字以内の概要",
-                    "category": "カテゴリ名",
-                    "image_prompt": "DALL-E 3用の画像生成プロンプト"
-                }
-            ]
-        }
+        **画像生成キーワード:**
+        - 「画像にして」
+        - 「画像を生成」
+        - 「画像を作って」
+        - 「イメージにして」
+        - 「絵にして」
+        - 「図にして」
+        - 「ビジュアル化」
+        - 「画像で表現」
+        - 「画像化」
+        - 「絵で表現」
+        
+        **使用例:**
+        ```
+        ユーザー: 「新商品のアイデアを画像にして」
+        → テキスト応答 + 画像生成・表示
         ```
         
-        **フィールドの説明：**
-        - `title`: 表示されるタイトル
-        - `summary`: 200文字以内の概要（超過分は自動切り詰め）
-        - `category`: アイデアのカテゴリ
-        - `image_prompt`: 画像生成指示がある場合のプロンプト
-        
-        **特徴：**
-        - 複数のアイデアを配列で返すことができます
-        - 各アイデアは区切り線で分けて表示されます
-        - 画像プロンプトがある場合は自動的にDALL-E 3で画像生成します
-        - JSON形式でない場合は通常のテキストとして表示されます
+        **特徴:**
+        - DALL-E 3による高品質な画像生成
+        - Google Driveへの自動保存（設定済みの場合）
+        - 整理番号による画像管理
+        - コスト効率的（明示的な指示がある場合のみ生成）
         """)
 
     with st.form("user_info_form"):
@@ -702,15 +652,8 @@ elif st.session_state.page == "chat":
         name = msg.get("name", role)
         avatar = assistant_avatar if role == "assistant" else user_avatar
         with st.chat_message(name, avatar=avatar):
-            if role == "assistant":
-                # アシスタントの場合は特別な表示処理
-                parsed_data = parse_dify_response(msg["content"])
-                if parsed_data["is_json"]:
-                    display_parsed_response(parsed_data)
-                else:
-                    st.markdown(msg["content"])
-            else:
-                st.markdown(msg["content"])
+            # すべてのメッセージはテキストとして表示
+            st.markdown(msg["content"])
 
     # --- チャット入力 ---
     if user_input := st.chat_input("メッセージを入力してください"):
@@ -787,9 +730,11 @@ elif st.session_state.page == "chat":
                     if new_cid and not st.session_state.cid:
                         st.session_state.cid = new_cid
 
-                    # 応答を解析して適切に表示
-                    parsed_data = parse_dify_response(answer)
-                    display_parsed_response(parsed_data)
+                    # 画像生成が必要かチェック
+                    should_create_image = should_generate_image(user_input, answer)
+                    
+                    # 応答を表示（必要に応じて画像生成も実行）
+                    display_response_with_conditional_image(answer, user_input, should_create_image)
 
             except requests.exceptions.HTTPError as e:
                 # エラーメッセージ本文をそのまま表示（原因の特定に有効）
@@ -805,40 +750,14 @@ elif st.session_state.page == "chat":
 
         # アシスタントの応答を保存
         if answer:
-            # パースされたデータに基づいて表示用の内容を作成
-            parsed_data = parse_dify_response(answer)
-            
-            if parsed_data["is_json"] and parsed_data["summaries"]:
-                # JSONの場合は構造化された内容で保存
-                display_content_parts = []
-                for i, summary_item in enumerate(parsed_data["summaries"]):
-                    if i > 0:
-                        display_content_parts.append("---")
-                    
-                    if summary_item["title"]:
-                        display_content_parts.append(f"**{summary_item['title']}**")
-                    
-                    if summary_item["category"]:
-                        display_content_parts.append(f"カテゴリ: {summary_item['category']}")
-                    
-                    if summary_item["summary"]:
-                        display_content_parts.append(summary_item["summary"])
-                    
-                    if summary_item["image_prompt"]:
-                        display_content_parts.append(f"🎨 画像生成: {summary_item['image_prompt']}")
-                
-                display_content = "\n\n".join(display_content_parts)
-            else:
-                display_content = answer
-            
-            assistant_message = {"role": "assistant", "content": display_content, "name": st.session_state.bot_type}
+            assistant_message = {"role": "assistant", "content": answer, "name": st.session_state.bot_type}
             st.session_state.messages.append(assistant_message)
             save_log(
                 st.session_state.cid or "(allocating...)",
                 st.session_state.bot_type,
                 "assistant",
                 st.session_state.bot_type,
-                display_content
+                answer
             )
 
         # 画面を再実行して、共有リンクやダウンロードボタンを更新
