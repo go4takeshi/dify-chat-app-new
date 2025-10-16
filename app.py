@@ -762,52 +762,11 @@ elif st.session_state.page == "chat":
             st.caption("⚠️ OpenAI APIキーが設定されていません")
             st.caption("画像生成機能を使用するには、Streamlit CloudのSecretsに `OPENAI_API_KEY` を設定してください。")
         else:
-            # 履歴がまだ読み込まれていない場合は先に読み込む
-            if st.session_state.cid and not st.session_state.messages:
-                try:
-                    history_df = load_history(st.session_state.cid)
-                    if not history_df.empty:
-                        for _, row in history_df.iterrows():
-                            st.session_state.messages.append({
-                                "role": row["role"],
-                                "content": row["content"],
-                                "name": row["name"]
-                            })
-                except Exception as e:
-                    st.caption(f"⚠️ 履歴読み込みエラー: {e}")
+            # 最新のチャット内容を取得（画像生成の元ネタ用）
+            latest_messages = st.session_state.messages[-5:] if st.session_state.messages else []
             
-            # 全てのチャット内容を取得（Google Sheets履歴 + 現在セッション）
-            all_messages = st.session_state.messages if st.session_state.messages else []
-            
-            # 参考にするメッセージを時系列順で選択（最新10件を表示）
-            message_options = ["手動入力"]
-            all_message_refs = {}
-            
-            # 最新10件のメッセージを時系列順で取得
-            recent_messages = all_messages[-10:] if len(all_messages) > 10 else all_messages
-            
-            for i, msg in enumerate(recent_messages):
-                # メッセージのプレビューを作成
-                content_preview = msg['content'][:35] + "..." if len(msg['content']) > 35 else msg['content']
-                
-                # 役割に応じたアイコンと名前を設定
-                if msg['role'] == 'user':
-                    icon = "👤"
-                    display_name = msg.get('name', 'ユーザー')
-                else:
-                    icon = "🤖"
-                    display_name = msg.get('name', 'AI')
-                
-                # 選択肢のキーを作成
-                option_key = f"{icon} {display_name}: {content_preview}"
-                message_options.append(option_key)
-                
-                # 実際のメッセージ内容を辞書に保存
-                all_message_refs[option_key] = msg['content']
-            
-            # 件数表示
-            if len(all_messages) > 0:
-                st.caption(f"💬 会話履歴: {len(all_messages)}件のメッセージ（最新10件を表示）")
+            # 参考にするメッセージを選択
+            message_options = ["手動入力"] + [f"{msg['name']}: {msg['content'][:30]}..." for msg in latest_messages if msg['content']]
             
             with st.form("image_generation_form"):
                 # コンパクトなレイアウト用の列
@@ -834,11 +793,12 @@ elif st.session_state.page == "chat":
                     image_content = st.text_area("画像にしたい内容", placeholder="例: 革新的な電動バイクのデザイン案", height=80)
                 else:
                     # 選択されたメッセージの内容を取得
-                    auto_content = all_message_refs.get(reference_message, "")
-                    if auto_content:
+                    selected_index = message_options.index(reference_message) - 1
+                    if selected_index >= 0 and selected_index < len(latest_messages):
+                        auto_content = latest_messages[selected_index]['content']
                         image_content = st.text_area("画像にしたい内容", value=auto_content, height=80)
                     else:
-                        image_content = st.text_area("画像にしたい内容", placeholder="選択されたメッセージが見つかりません", height=80)
+                        image_content = ""
                 
                 # サイズとボタンを横並び
                 col_size, col_btn = st.columns([1, 1])
@@ -864,13 +824,17 @@ elif st.session_state.page == "chat":
                             generated_image, image_bytes = generate_image_with_dalle3(image_prompt, selected_size)
                             
                         if generated_image and image_bytes:
-                            st.success("✅ 画像生成完了！")
-                            
-                            # 画像表示をコンパクトに
-                            col_img, col_save = st.columns([2, 1])
-                            
-                            with col_img:
-                                st.image(generated_image, caption=f"{style_options[selected_style]} ({selected_size})", width=300)
+                            # セッションステートに保存（フォーム外で使用するため）
+                            st.session_state.generated_image = generated_image
+                            st.session_state.generated_image_bytes = image_bytes
+                            st.session_state.generated_image_prompt = image_prompt
+                            st.session_state.generated_image_content = image_content
+                            st.session_state.generated_image_style = style_options[selected_style]
+                            st.session_state.generated_image_size = selected_size
+                            st.success("✅ 画像生成完了！下に表示されます。")
+                            st.rerun()  # 画面を再描画して結果を表示
+
+                                
                             
                             with col_save:
                                 # Google Drive保存の条件をチェック
@@ -908,6 +872,70 @@ elif st.session_state.page == "chat":
                                     st.caption("� Drive保存には認証設定が必要")
                         else:
                             st.error("❌ 画像生成に失敗しました")
+            
+            # フォーム外で画像表示と保存処理（セッションステートから取得）
+            if hasattr(st.session_state, 'generated_image') and st.session_state.generated_image is not None:
+                # 画像表示をコンパクトに
+                col_img, col_save = st.columns([2, 1])
+                
+                with col_img:
+                    st.image(
+                        st.session_state.generated_image, 
+                        caption=f"{st.session_state.generated_image_style} ({st.session_state.generated_image_size})", 
+                        width=300
+                    )
+                
+                with col_save:
+                    # Google Drive保存の条件をチェック
+                    has_gcp = st.secrets.get("gcp_service_account") is not None
+                    has_gsheet = st.secrets.get("gsheet_id") is not None
+                    
+                    if has_gcp and has_gsheet:
+                        if st.button("💾 Drive保存", key="save_generated_image", use_container_width=True):
+                            with st.spinner("保存中..."):
+                                try:
+                                    image_id = generate_image_id()
+                                    drive_file_id, drive_link_or_error = save_image_to_drive(
+                                        st.session_state.generated_image_bytes, 
+                                        image_id, 
+                                        st.session_state.generated_image_prompt,
+                                        st.session_state.get("cid", "manual_generation")
+                                    )
+                                    
+                                    if drive_file_id:
+                                        st.success("✅ 保存完了！")
+                                        st.caption(f"ID: `{image_id}`")
+                                        if drive_link_or_error:
+                                            st.link_button("🔗 Drive表示", drive_link_or_error)
+                                        
+                                        # ログ記録
+                                        save_log(
+                                            st.session_state.get("cid", "manual_generation"),
+                                            "manual_image_generation", "system", "image_save",
+                                            f"手動画像生成: {st.session_state.generated_image_content[:100]}...",
+                                            image_id, drive_file_id, drive_link_or_error or ""
+                                        )
+                                        
+                                        # 保存後はセッションステートをクリア
+                                        for key in ['generated_image', 'generated_image_bytes', 'generated_image_prompt', 
+                                                  'generated_image_content', 'generated_image_style', 'generated_image_size']:
+                                            if key in st.session_state:
+                                                del st.session_state[key]
+                                        st.rerun()
+                                    else:
+                                        st.error(f"❌ 保存失敗: {drive_link_or_error}")
+                                except Exception as e:
+                                    st.error(f"❌ 保存エラー: {e}")
+                        
+                        # クリアボタンを追加
+                        if st.button("🗑️ クリア", key="clear_generated_image", use_container_width=True):
+                            for key in ['generated_image', 'generated_image_bytes', 'generated_image_prompt', 
+                                      'generated_image_content', 'generated_image_style', 'generated_image_size']:
+                                if key in st.session_state:
+                                    del st.session_state[key]
+                            st.rerun()
+                    else:
+                        st.caption("💡 Drive保存には認証設定が必要")
 
     # --- アバター設定 ---
     assistant_avatar_file = PERSONA_AVATARS.get(st.session_state.bot_type, "default_assistant.png")
@@ -917,19 +945,16 @@ elif st.session_state.page == "chat":
         st.info(f"アシスタントのアバター画像（{assistant_avatar_file}）が見つかりません。リポジトリのルートに画像を配置すると表示されます。")
 
     # --- 履歴表示 ---
-    # Google Sheetsから履歴を読み込み（画像生成セクションで既に実行済みの場合はスキップ）
+    # 1. Google Sheetsから履歴を読み込み
     if st.session_state.cid and not st.session_state.messages:
-        try:
-            history_df = load_history(st.session_state.cid)
-            if not history_df.empty:
-                for _, row in history_df.iterrows():
-                    st.session_state.messages.append({
-                        "role": row["role"],
-                        "content": row["content"],
-                        "name": row["name"]
-                    })
-        except Exception as e:
-            st.info(f"履歴の読み込みに失敗しました: {e}")
+        history_df = load_history(st.session_state.cid)
+        if not history_df.empty:
+            for _, row in history_df.iterrows():
+                st.session_state.messages.append({
+                    "role": row["role"],
+                    "content": row["content"],
+                    "name": row["name"]
+                })
 
     # 2. st.session_state.messages を表示
     for msg in st.session_state.messages:
