@@ -9,6 +9,12 @@
 - 会話の共有（会話ID）
 - 会話ログを Google Sheets に保存
 - 会話途中で CSV をアップロードし LLM に渡す（先頭100行を添付可能）
+- **🎨 画像生成機能**
+  - Difyとは独立した画像生成セクション
+  - 最近のチャット内容を参考にした画像生成
+  - 7種類のスタイル選択（プロフェッショナル、アート風、写真風など）
+  - 4種類のサイズ選択（正方形、横長、縦長、コスト削減用小サイズ）
+  - Google Driveへの自動保存機能
 - チャット履歴を CSV ダウンロード
   - 通常形式（role, name, content）
   - キーワード分割形式（assistant の content を改行で分割して `keyword_1..` 列に展開）
@@ -37,8 +43,44 @@ streamlit run app.py
 ## Secrets と設定
 - Streamlit Community Cloud にデプロイする場合は、以下の Secrets を設定してください:
   - `PERSONA_1_KEY`, `PERSONA_2_KEY`, ... のように各ペルソナの API キー
+  - `OPENAI_API_KEY`（画像生成機能用のOpenAI APIキー）
   - `gcp_service_account`（Google Service Account の JSON文字列、Google Sheets に保存する場合）
   - `gsheet_id`（Google Sheets のキー）
+  - `drive_folder_name`（画像保存用Google Driveフォルダ名、省略時は "MinonBC_AI_Images"）
+
+### Secrets設定例
+```toml
+[secrets]
+PERSONA_1_KEY = "app-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+PERSONA_2_KEY = "app-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+OPENAI_API_KEY = "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+gsheet_id = "1AbCdEfGhIjKlMnOpQrStUvWxYz123456789"
+drive_folder_name = "AI画像_2024年プロジェクト"
+gcp_service_account = """
+{
+  "type": "service_account",
+  "project_id": "your-project-id",
+  ...
+}
+"""
+```
+
+## 画像生成機能の使い方
+1. **Difyでアイディア抽出**
+   - 左側のチャットでDifyに商品アイディアや企画を相談
+   - 「画像については取り扱っていない」と言われても大丈夫
+
+2. **画像生成に移行**
+   - 右側の「参考にするメッセージ」で最近のチャット内容を選択
+   - または「手動入力」で独自の内容を記述
+
+3. **細かな調整**
+   - スタイル（プロフェッショナル、アート風、写真風など）を選択
+   - サイズ（正方形、横長、縦長、コスト削減用など）を選択
+
+4. **生成・保存**
+   - 「画像を生成する」ボタンで実行
+   - 「Google Driveに保存」で永続化
 
 ## テストチェックリスト（キーワード分割機能）
 1. アプリを起動し、ペルソナを選択してチャットを開始する。
