@@ -197,10 +197,12 @@ def generate_image_id():
 def save_image_to_drive(image_bytes, image_id, prompt, conversation_id):
     """画像をGoogle Driveに保存"""
     try:
+        st.info("🔍 Google Drive サービスを初期化中...")
         drive_service = _drive_service()
         if not drive_service:
             return None, "Google Drive サービスが利用できません"
         
+        st.info("📁 フォルダを確認・作成中...")
         # フォルダ確認・作成
         folder_name = "MinonBC_AI_Images"
         folder_id = get_or_create_drive_folder(drive_service, folder_name)
@@ -208,8 +210,11 @@ def save_image_to_drive(image_bytes, image_id, prompt, conversation_id):
         if not folder_id:
             return None, "フォルダの作成に失敗しました"
         
+        st.info(f"📁 フォルダID: {folder_id}")
+        
         # ファイル名を作成
         filename = f"{image_id}_image.jpg"
+        st.info(f"📄 ファイル名: {filename}")
         
         # メタデータを設定
         file_metadata = {
@@ -220,6 +225,7 @@ def save_image_to_drive(image_bytes, image_id, prompt, conversation_id):
         
         # 画像をアップロード
         try:
+            st.info("⬆️ Google Driveにアップロード中...")
             from googleapiclient.http import MediaIoBaseUpload
             media = MediaIoBaseUpload(io.BytesIO(image_bytes), mimetype='image/jpeg')
             
@@ -229,16 +235,29 @@ def save_image_to_drive(image_bytes, image_id, prompt, conversation_id):
                 fields='id,webViewLink,webContentLink'
             ).execute()
             
-            return file.get('id'), file.get('webViewLink')
-        except ImportError:
-            return None, "Google API Client ライブラリが不足しています"
+            file_id = file.get('id')
+            web_view_link = file.get('webViewLink')
+            st.info(f"✅ アップロード成功 - ファイルID: {file_id}")
+            
+            return file_id, web_view_link
+        except ImportError as e:
+            error_msg = f"Google API Client ライブラリが不足しています: {e}"
+            st.error(error_msg)
+            return None, error_msg
+        except Exception as upload_error:
+            error_msg = f"アップロードエラー: {upload_error}"
+            st.error(error_msg)
+            return None, error_msg
         
     except Exception as e:
-        return None, f"Google Drive保存エラー: {e}"
+        error_msg = f"Google Drive保存エラー: {e}"
+        st.error(error_msg)
+        return None, error_msg
 
 def get_or_create_drive_folder(drive_service, folder_name):
     """Google Driveでフォルダを取得または作成"""
     try:
+        st.info(f"🔍 フォルダ '{folder_name}' を検索中...")
         # 既存フォルダを検索
         results = drive_service.files().list(
             q=f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder'",
@@ -246,11 +265,15 @@ def get_or_create_drive_folder(drive_service, folder_name):
         ).execute()
         
         folders = results.get('files', [])
+        st.info(f"📁 検索結果: {len(folders)}個のフォルダが見つかりました")
         
         if folders:
-            return folders[0]['id']
+            folder_id = folders[0]['id']
+            st.info(f"✅ 既存フォルダを使用: {folder_id}")
+            return folder_id
         
         # フォルダが存在しない場合は作成
+        st.info("📁 新しいフォルダを作成中...")
         folder_metadata = {
             'name': folder_name,
             'mimeType': 'application/vnd.google-apps.folder'
@@ -261,10 +284,13 @@ def get_or_create_drive_folder(drive_service, folder_name):
             fields='id'
         ).execute()
         
-        return folder.get('id')
+        folder_id = folder.get('id')
+        st.info(f"✅ フォルダ作成成功: {folder_id}")
+        return folder_id
         
     except Exception as e:
-        st.error(f"フォルダ操作エラー: {e}")
+        error_msg = f"フォルダ操作エラー: {e}"
+        st.error(error_msg)
         return None
 
 def display_response_with_conditional_image(bot_response, user_input, generate_image=False):
@@ -286,49 +312,72 @@ def display_response_with_conditional_image(bot_response, user_input, generate_i
             generated_image, image_bytes = generate_image_with_dalle3(image_prompt, specs['size'])
             
         if generated_image and image_bytes:
-            st.image(generated_image, caption=f"生成画像（{specs['style']}スタイル, {specs['size']}）", use_container_width=True)
+            st.image(generated_image, caption=f"生成画像（{specs['style']}スタイル, {specs['size']}）", width="stretch")
+            
+            # Google Drive保存の条件をチェック
+            has_gcp = st.secrets.get("gcp_service_account") is not None
+            has_gsheet = st.secrets.get("gsheet_id") is not None
+            
+            st.info(f"🔍 設定確認: GCP認証={has_gcp}, GSheet ID={has_gsheet}")
             
             # Google Driveに画像を保存
-            if st.secrets.get("gcp_service_account") and st.secrets.get("gsheet_id"):
+            if has_gcp and has_gsheet:
                 with st.spinner("Google Driveに画像を保存しています..."):
-                    image_id = generate_image_id()
-                    drive_file_id, drive_link_or_error = save_image_to_drive(
-                        image_bytes, 
-                        image_id, 
-                        image_prompt,
-                        st.session_state.get("cid", "unknown")
-                    )
-                    
-                    if drive_file_id:
-                        st.success(f"✅ **画像をGoogle Driveに保存しました**")
-                        st.info(f"**整理番号:** `{image_id}`")
-                        if drive_link_or_error:
-                            st.markdown(f"🔗 [Google Driveで表示]({drive_link_or_error})")
+                    try:
+                        image_id = generate_image_id()
+                        st.info(f"🆔 画像ID生成: {image_id}")
                         
-                        # 画像情報をGoogle Sheetsに記録
-                        save_log(
-                            st.session_state.get("cid", "unknown"),
-                            st.session_state.get("bot_type", "unknown"),
-                            "system",
-                            "image_save",
-                            f"画像保存: {bot_response[:100]}...",
-                            image_id,
-                            drive_file_id,
-                            drive_link_or_error or ""
+                        drive_file_id, drive_link_or_error = save_image_to_drive(
+                            image_bytes, 
+                            image_id, 
+                            image_prompt,
+                            st.session_state.get("cid", "unknown")
                         )
                         
-                        # セッション状態に画像情報を保存（再表示用）
-                        if "saved_images" not in st.session_state:
-                            st.session_state.saved_images = []
-                        st.session_state.saved_images.append({
-                            "image_id": image_id,
-                            "drive_link": drive_link_or_error,
-                            "prompt": image_prompt
-                        })
-                    else:
-                        st.error(f"❌ 画像保存に失敗しました: {drive_link_or_error}")
+                        if drive_file_id:
+                            st.success(f"✅ **画像をGoogle Driveに保存しました**")
+                            st.info(f"**整理番号:** `{image_id}`")
+                            if drive_link_or_error:
+                                st.markdown(f"🔗 [Google Driveで表示]({drive_link_or_error})")
+                            
+                            # 画像情報をGoogle Sheetsに記録
+                            try:
+                                save_log(
+                                    st.session_state.get("cid", "unknown"),
+                                    st.session_state.get("bot_type", "unknown"),
+                                    "system",
+                                    "image_save",
+                                    f"画像保存: {bot_response[:100]}...",
+                                    image_id,
+                                    drive_file_id,
+                                    drive_link_or_error or ""
+                                )
+                                st.info("📊 Google Sheetsにログ記録完了")
+                            except Exception as log_error:
+                                st.warning(f"⚠️ ログ記録エラー: {log_error}")
+                            
+                            # セッション状態に画像情報を保存（再表示用）
+                            if "saved_images" not in st.session_state:
+                                st.session_state.saved_images = []
+                            st.session_state.saved_images.append({
+                                "image_id": image_id,
+                                "drive_link": drive_link_or_error,
+                                "prompt": image_prompt
+                            })
+                        else:
+                            st.error(f"❌ 画像保存に失敗しました: {drive_link_or_error}")
+                    
+                    except Exception as save_error:
+                        st.error(f"❌ 保存処理中にエラーが発生しました: {save_error}")
             else:
-                st.info("💡 Google Drive保存機能が無効です。SecretsにGoogle認証情報を設定すると自動保存されます。")
+                missing_items = []
+                if not has_gcp:
+                    missing_items.append("GCP認証情報")
+                if not has_gsheet:
+                    missing_items.append("Google Sheets ID")
+                
+                st.info(f"💡 Google Drive保存機能が無効です。不足: {', '.join(missing_items)}")
+                st.info("SecretsにGoogle認証情報を設定すると自動保存されます。")
                 
         else:
             st.error("画像の生成に失敗しました。")
@@ -383,19 +432,26 @@ def _drive_service():
 
         sa_info = _get_sa_dict()
         if not sa_info:
+            st.error("❌ サービスアカウント情報が取得できません")
             return None
 
+        st.info("🔑 Google Drive API 認証中...")
         scopes = [
             "https://www.googleapis.com/auth/spreadsheets",
             "https://www.googleapis.com/auth/drive.file"
         ]
         creds = Credentials.from_service_account_info(sa_info, scopes=scopes)
-        return build('drive', 'v3', credentials=creds)
-    except ImportError:
-        st.error("Google API Client ライブラリがインストールされていません。`pip install google-api-python-client` を実行してください。")
+        service = build('drive', 'v3', credentials=creds)
+        st.info("✅ Google Drive API 認証成功")
+        return service
+    except ImportError as e:
+        error_msg = f"Google API Client ライブラリがインストールされていません: {e}"
+        st.error(error_msg)
+        st.info("📦 **インストール方法:**\n```bash\npip install google-api-python-client\n```")
         return None
     except Exception as e:
-        st.error(f"Google Drive API サービスの初期化に失敗しました: {e}")
+        error_msg = f"Google Drive API サービスの初期化に失敗しました: {e}"
+        st.error(error_msg)
         return None
 
 def _open_sheet():
