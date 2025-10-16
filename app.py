@@ -31,9 +31,9 @@ def get_openai_client():
 
 # ペルソナの表示名とSecretsのキーをマッピング
 PERSONA_NAMES = [
-    "①ミノンBC理想ファン_乳児ママ_本田ゆい（30）",
-    "②ミノンBC理想ファン_乳児パパ_安西涼太（31）",
-    "③ミノンBC理想ファン_保育園/幼稚園ママ_戸田綾香（35）",
+    "①ひらめ１号_g1",
+    "②ひらめ１号_g2",
+    "③ひらめ１号_g3",
 ]
 
 
@@ -68,9 +68,9 @@ PERSONA_API_KEYS = get_persona_api_keys()
 
 # アバター（ファイルが無い場合は絵文字にフォールバック）
 PERSONA_AVATARS = {
-    "①ミノンBC理想ファン_乳児ママ_本田ゆい（30）": "persona_1.jpg",
-    "②ミノンBC理想ファン_乳児パパ_安西涼太（31）": "persona_2.jpg",
-    "③ミノンBC理想ファン_保育園/幼稚園ママ_戸田綾香（35）": "persona_3.jpg",
+    "①ひらめ１号_g1": "persona_1.jpg",
+    "②ひらめ１号_g2": "persona_2.jpg",
+    "③ひらめ１号_g3": "persona_3.jpg",
 }
 
 # =========================
@@ -445,7 +445,7 @@ def load_history(conversation_id: str) -> pd.DataFrame:
 # =========================
 # Streamlit UI
 # =========================
-st.set_page_config(page_title="ミノンBC AIファンチャット", layout="centered")
+st.set_page_config(page_title="ひらめ１号との対話", layout="centered")
 
 # --- session_stateの初期化 ---
 def init_session_state():
@@ -476,7 +476,7 @@ if st.session_state.page == "login" and st.query_params.get("page") == "chat":
 
 # ========== STEP 1: ログイン画面 ==========
 if st.session_state.page == "login":
-    st.title("ミノンBC AIファンとの対話")
+    st.title("ひらめ１号との対話")
 
     # APIキーが一つも設定されていない場合はエラー表示
     if not PERSONA_API_KEYS:
@@ -786,3 +786,4 @@ else:
     if st.button("最初のページに戻る"):
         init_session_state()
         st.rerun()
+
