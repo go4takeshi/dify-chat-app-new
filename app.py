@@ -222,15 +222,20 @@ def _get_sa_dict():
     """Secretsの gcp_service_account から dict を返す（JSON文字列/TOMLテーブル両対応）"""
     if "gcp_service_account" not in st.secrets:
         return None
-    raw = st.secrets["gcp_service_account"]
-    if isinstance(raw, str):
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError:
-            # private_key の実改行を \n に自動補正して再トライ（貼付ミス救済）
-            fixed = raw.replace("\r\n", "\n").replace("\n", "\\n")
-            return json.loads(fixed)
-    return dict(raw)
+    try:
+        raw = st.secrets["gcp_service_account"]
+        if isinstance(raw, str):
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                # private_key の実改行を \n に自動補正して再トライ（貼付ミス救済）
+                fixed = raw.replace("\r\n", "\n").replace("\n", "\\n")
+                return json.loads(fixed)
+        return dict(raw)
+    except Exception as e:
+        if st.secrets.get("DEBUG_MODE", False):
+            st.error(f"サービスアカウント情報の読み込みエラー: {e}")
+        return None
 
 @st.cache_resource
 def _gs_client():
@@ -283,6 +288,10 @@ def _open_sheet():
 def save_log(conversation_id: str, bot_type: str, role: str, name: str, content: str):
     """一行追記（指数バックオフの簡易リトライ付き）"""
     from gspread.exceptions import APIError
+    
+    # Google Sheets機能が無効な場合はスキップ
+    if "gcp_service_account" not in st.secrets or "gsheet_id" not in st.secrets:
+        return
 
     try:
         ws = _open_sheet()
@@ -300,11 +309,20 @@ def save_log(conversation_id: str, bot_type: str, role: str, name: str, content:
                 raise
         raise RuntimeError("Google Sheets への保存に連続失敗しました。")
     except Exception as e:
-        st.warning(f"Google Sheetsへのログ保存中にエラーが発生しました: {e}")
+        # より詳細なエラー情報を表示
+        error_type = type(e).__name__
+        st.warning(f"Google Sheetsへのログ保存中にエラーが発生しました ({error_type}): {e}")
+        # デバッグ用（開発時のみ）
+        if st.secrets.get("DEBUG_MODE", False):
+            st.error(f"詳細エラー: {e}", icon="🐛")
 
 @st.cache_data(ttl=60)  # ライブ更新のため短めのTTL
 def load_history(conversation_id: str) -> pd.DataFrame:
     """指定された会話IDの履歴をGoogle Sheetsから読み込む"""
+    # Google Sheets機能が無効な場合は空のDataFrameを返す
+    if "gcp_service_account" not in st.secrets or "gsheet_id" not in st.secrets:
+        return pd.DataFrame(columns=["timestamp", "conversation_id", "bot_type", "role", "name", "content"])
+        
     try:
         ws = _open_sheet()
         data = ws.get_all_records()
@@ -318,8 +336,9 @@ def load_history(conversation_id: str) -> pd.DataFrame:
             df_filtered = df_filtered.sort_values("timestamp")
         return df_filtered
     except Exception as e:
-        st.error(f"Google Sheetsからの履歴読み込み中にエラーが発生しました: {e}")
-        return pd.DataFrame()
+        error_type = type(e).__name__
+        st.warning(f"Google Sheetsからの履歴読み込み中にエラーが発生しました ({error_type}): {e}")
+        return pd.DataFrame(columns=["timestamp", "conversation_id", "bot_type", "role", "name", "content"])
 
 # =========================
 # Streamlit UI
@@ -366,8 +385,12 @@ if st.session_state.page == "login":
     if not st.secrets.get("OPENAI_API_KEY"):
         st.warning("⚠️ OpenAI APIキーが設定されていません。画像生成機能を使用するには、Streamlit CloudのSecretsに `OPENAI_API_KEY` を設定してください。")
     
+    # Google Sheets設定の確認
+    if not st.secrets.get("gcp_service_account") or not st.secrets.get("gsheet_id"):
+        st.info("💡 Google Sheets設定が不完全です。チャット履歴の永続化機能は無効になります。")
+    
     # JSON出力フォーマットの説明
-    with st.expander("📖 Dify出力フォーマットについて"):
+    with st.expander("📖 Dify出力フォーマットについて", expanded=False):
         st.markdown("""
         **JSON形式での出力**
         
@@ -645,5 +668,3 @@ else:
     if st.button("最初のページに戻る"):
         init_session_state()
         st.rerun()
-
-
