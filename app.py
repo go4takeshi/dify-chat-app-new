@@ -753,299 +753,273 @@ elif st.session_state.page == "chat":
             share_link = f"?{urlencode(params)}"
             st.code(share_link, language="text")
 
-    # --- レイアウト: メインチャット + 画像生成サイドバー ---
-    col1, col2 = st.columns([2, 1])
+    # --- 画像生成機能（コンパクト・扉形式） ---
+    # OpenAI APIキーの確認
+    has_openai_key = st.secrets.get("OPENAI_API_KEY") is not None
     
-    with col1:
-        st.markdown("### 💬 AIチャット")
-        
-        # --- アバター設定 ---
-        assistant_avatar_file = PERSONA_AVATARS.get(st.session_state.bot_type, "default_assistant.png")
-        user_avatar = st.session_state.get("user_avatar_data") if st.session_state.get("user_avatar_data") else "👤"
-        assistant_avatar = assistant_avatar_file if os.path.exists(assistant_avatar_file) else "🤖"
-        if assistant_avatar == "🤖":
-            st.info(f"アシスタントのアバター画像（{assistant_avatar_file}）が見つかりません。リポジトリのルートに画像を配置すると表示されます。")
-
-        # --- 履歴表示 ---
-        # 1. Google Sheetsから履歴を読み込み
-        if st.session_state.cid and not st.session_state.messages:
-            history_df = load_history(st.session_state.cid)
-            if not history_df.empty:
-                for _, row in history_df.iterrows():
-                    st.session_state.messages.append({
-                        "role": row["role"],
-                        "content": row["content"],
-                        "name": row["name"]
-                    })
-
-        # 2. st.session_state.messages を表示
-        for msg in st.session_state.messages:
-            role = msg["role"]
-            name = msg.get("name", role)
-            avatar = assistant_avatar if role == "assistant" else user_avatar
-            with st.chat_message(name, avatar=avatar):
-                # すべてのメッセージはテキストとして表示
-                st.markdown(msg["content"])
-
-        # --- チャット入力 ---
-        if user_input := st.chat_input("メッセージを入力してください"):
-            # ユーザーメッセージを即時表示
-            user_message = {"role": "user", "content": user_input, "name": st.session_state.name}
-            st.session_state.messages.append(user_message)
-            with st.chat_message(st.session_state.name, avatar=user_avatar):
-                st.markdown(user_input)
-
-            # ユーザーメッセージをログに保存
-            save_log(
-                st.session_state.cid or "(allocating...)",
-                st.session_state.bot_type,
-                "user",
-                st.session_state.name,
-                user_input
-            )
-
-            # --- Dify APIへリクエスト（画像生成キーワードチェックを削除） ---
-            api_key = PERSONA_API_KEYS.get(st.session_state.bot_type)
-            if not api_key:
-                st.error("選択されたペルソナのAPIキーが未設定です。")
-                st.stop()
-
-            headers = {"Authorization": f"Bearer {api_key}"}  # Content-Type は json= が自動付与
-
-            # 表示名→英数字・短めの安定IDに正規化（表示名自体はUI表示に使い、APIには安定IDを渡す）
-            import re, hashlib
-            raw_name = st.session_state.name or "guest"
-            user_id = re.sub(r'[^A-Za-z0-9_-]', '_', raw_name).strip('_')[:64] or hashlib.md5(raw_name.encode()).hexdigest()[:16]
-
-            # inputs は Dify 側の User Inputs とキー名を一致させること（未定義キーは送らない）
-            inputs = {}
-
-            payload = {
-                "inputs": inputs,
-                "query": user_input,
-                "user": user_id,
-                "response_mode": "blocking",
-            }
-            # ★初回は conversation_id を"送らない"（空文字は入れない）
-            if st.session_state.cid:
-                payload["conversation_id"] = st.session_state.cid
-
-            def call_dify(pyld):
-                return requests.post(DIFY_CHAT_URL, headers=headers, json=pyld, timeout=60)
-
-            with st.chat_message(st.session_state.bot_type, avatar=assistant_avatar):
-                answer = ""
-                try:
-                    with st.spinner("AIが応答を生成中です..."):
-                        res = call_dify(payload)
-
-                        # --- 400 対策：会話IDが原因っぽいときだけ1回だけフォールバック ---
-                        if res.status_code == 400 and payload.get("conversation_id"):
-                            try:
-                                # JSON形式で解析を試行
-                                errj = res.json()
-                                emsg = (errj.get("message") or errj.get("error") or errj.get("detail") or "")
-                            except Exception:
-                                # JSONで解析できない場合はテキストとして扱う
-                                emsg = res.text
-                            # "conversation", "invalid" 等の語を含む場合に会話IDを外して再送
-                            if any(k in emsg.lower() for k in ["conversation", "invalid id", "must not be empty"]):
-                                bad_cid = payload.pop("conversation_id")
-                                res = call_dify(payload)
-                                if res.ok:
-                                    st.warning(f"無効な会話IDだったため新規会話で再開しました（old={bad_cid}）")
-
-                        res.raise_for_status()
-                        
-                        # レスポンスの形式を判定して処理
-                        try:
-                            # JSON形式での解析を試行
-                            rj = res.json()
-                            answer = rj.get("answer", "⚠️ 応答がありませんでした。")
-                            
-                            # 新規会話IDが発行されたら保存
-                            new_cid = rj.get("conversation_id")
-                            if new_cid and not st.session_state.cid:
-                                st.session_state.cid = new_cid
-                                
-                        except (json.JSONDecodeError, ValueError):
-                            # JSON形式でない場合はテキストとして処理
-                            answer = res.text.strip()
-                            
-                            # テキスト応答から会話IDを抽出しようと試みる（オプション）
-                            # 例: "conversation_id: xxxx" のような形式がテキストに含まれている場合
-                            import re
-                            cid_match = re.search(r'conversation_id:\s*([a-zA-Z0-9\-_]+)', answer)
-                            if cid_match and not st.session_state.cid:
-                                st.session_state.cid = cid_match.group(1)
-                                # 会話IDが含まれている場合は、その部分を除去
-                                answer = re.sub(r'conversation_id:\s*[a-zA-Z0-9\-_]+\s*', '', answer).strip()
-
-                        # 応答をテキストのみ表示（画像生成は別セクションで実行）
-                        st.markdown(answer)
-
-                except requests.exceptions.HTTPError as e:
-                    # エラーメッセージ本文をそのまま表示（原因の特定に有効）
-                    body_text = getattr(e.response, "text", "(レスポンスボディ取得不可)")
-                    st.error(f"⚠️ APIリクエストでHTTPエラーが発生しました (ステータスコード: {e.response.status_code})\n\n```\n{body_text}\n```")
-                    answer = f"⚠️ APIリクエストでHTTPエラーが発生しました (ステータスコード: {e.response.status_code})\n\n```\n{body_text}\n```"
-                except requests.exceptions.RequestException as e:
-                    st.error(f"⚠️ APIリクエストで通信エラーが発生しました: {e}")
-                    answer = f"⚠️ APIリクエストで通信エラーが発生しました: {e}"
-                except Exception as e:
-                    st.error(f"⚠️ 不明なエラーが発生しました: {e}")
-                    answer = f"⚠️ 不明なエラーが発生しました: {e}"
-
-            # アシスタントの応答を保存
-            if answer:
-                assistant_message = {"role": "assistant", "content": answer, "name": st.session_state.bot_type}
-                st.session_state.messages.append(assistant_message)
-                save_log(
-                    st.session_state.cid or "(allocating...)",
-                    st.session_state.bot_type,
-                    "assistant",
-                    st.session_state.bot_type,
-                    answer
-                )
-
-            # 画面を再実行して、共有リンクやダウンロードボタンを更新
-            st.rerun()
-
-    # --- 画像生成専用セクション ---
-    with col2:
-        st.markdown("### 🎨 画像生成")
-        
-        # OpenAI APIキーの確認
-        if not st.secrets.get("OPENAI_API_KEY"):
-            st.warning("⚠️ OpenAI APIキーが設定されていません")
-            st.info("画像生成機能を使用するには、Streamlit CloudのSecretsに `OPENAI_API_KEY` を設定してください。")
+    with st.expander("🎨 画像生成機能", expanded=False):
+        if not has_openai_key:
+            st.caption("⚠️ OpenAI APIキーが設定されていません")
+            st.caption("画像生成機能を使用するには、Streamlit CloudのSecretsに `OPENAI_API_KEY` を設定してください。")
         else:
             # 最新のチャット内容を取得（画像生成の元ネタ用）
             latest_messages = st.session_state.messages[-5:] if st.session_state.messages else []
             
             # 参考にするメッセージを選択
-            message_options = ["手動入力"] + [f"{msg['name']}: {msg['content'][:50]}..." for msg in latest_messages if msg['content']]
+            message_options = ["手動入力"] + [f"{msg['name']}: {msg['content'][:30]}..." for msg in latest_messages if msg['content']]
             
             with st.form("image_generation_form"):
-                st.markdown("#### 📝 画像生成設定")
+                # コンパクトなレイアウト用の列
+                col_ref, col_style = st.columns(2)
                 
-                reference_message = st.selectbox(
-                    "参考にするメッセージ",
-                    message_options,
-                    help="最近のチャット内容から画像生成の元にするメッセージを選択できます"
-                )
+                with col_ref:
+                    reference_message = st.selectbox(
+                        "参考メッセージ",
+                        message_options,
+                        help="最近のチャット内容から選択"
+                    )
+                
+                with col_style:
+                    # スタイル選択（コンパクト）
+                    style_options = {
+                        "professional": "🏢 プロ", "minimalist": "✨ ミニマル", 
+                        "photorealistic": "📸 写真風", "artistic": "🎨 アート",
+                        "sketch": "✏️ スケッチ", "chart": "📊 図表", "business": "💼 ビジネス"
+                    }
+                    selected_style = st.selectbox("スタイル", list(style_options.keys()), format_func=lambda x: style_options[x])
                 
                 # 手動入力またはメッセージ内容を設定
                 if reference_message == "手動入力":
-                    image_content = st.text_area(
-                        "画像にしたい内容",
-                        placeholder="例: 革新的な電動バイクのデザイン案",
-                        height=100
-                    )
+                    image_content = st.text_area("画像にしたい内容", placeholder="例: 革新的な電動バイクのデザイン案", height=80)
                 else:
                     # 選択されたメッセージの内容を取得
                     selected_index = message_options.index(reference_message) - 1
                     if selected_index >= 0 and selected_index < len(latest_messages):
                         auto_content = latest_messages[selected_index]['content']
-                        image_content = st.text_area(
-                            "画像にしたい内容",
-                            value=auto_content,
-                            height=100
-                        )
+                        image_content = st.text_area("画像にしたい内容", value=auto_content, height=80)
                     else:
                         image_content = ""
                 
-                # スタイル選択
-                style_options = {
-                    "professional": "🏢 プロフェッショナル",
-                    "minimalist": "✨ ミニマリスト", 
-                    "photorealistic": "📸 写真風",
-                    "artistic": "🎨 アート風",
-                    "sketch": "✏️ スケッチ風",
-                    "chart": "📊 チャート・図表",
-                    "business": "💼 ビジネス向け"
-                }
+                # サイズとボタンを横並び
+                col_size, col_btn = st.columns([1, 1])
                 
-                selected_style = st.selectbox(
-                    "画像スタイル",
-                    list(style_options.keys()),
-                    format_func=lambda x: style_options[x]
-                )
+                with col_size:
+                    size_options = {
+                        "1024x1024": "📐 正方形", "1792x1024": "📱 横長", 
+                        "1024x1792": "📱 縦長", "512x512": "💰 小サイズ"
+                    }
+                    selected_size = st.selectbox("サイズ", list(size_options.keys()), format_func=lambda x: size_options[x])
                 
-                # サイズ選択
-                size_options = {
-                    "1024x1024": "📐 正方形 (1024×1024)",
-                    "1792x1024": "📱 横長 (1792×1024)", 
-                    "1024x1792": "📱 縦長 (1024×1792)",
-                    "512x512": "💰 小サイズ (512×512) - コスト削減"
-                }
-                
-                selected_size = st.selectbox(
-                    "画像サイズ",
-                    list(size_options.keys()),
-                    format_func=lambda x: size_options[x]
-                )
-                
-                # 生成ボタン
-                generate_button = st.form_submit_button(
-                    "🎨 画像を生成する",
-                    use_container_width=True
-                )
+                with col_btn:
+                    st.write("")  # スペース調整
+                    generate_button = st.form_submit_button("🎨 画像生成", use_container_width=True)
                 
                 if generate_button:
                     if not image_content.strip():
                         st.error("画像にしたい内容を入力してください。")
                     else:
                         # 画像生成実行
-                        with st.spinner("DALL-E 3で画像を生成しています..."):
+                        with st.spinner("DALL-E 3で画像を生成中..."):
                             image_prompt = create_image_prompt_from_text(image_content, selected_style)
                             generated_image, image_bytes = generate_image_with_dalle3(image_prompt, selected_size)
                             
                         if generated_image and image_bytes:
                             st.success("✅ 画像生成完了！")
-                            st.image(generated_image, caption=f"{style_options[selected_style]} ({selected_size})", width="stretch")
                             
-                            # Google Drive保存の条件をチェック
-                            has_gcp = st.secrets.get("gcp_service_account") is not None
-                            has_gsheet = st.secrets.get("gsheet_id") is not None
+                            # 画像表示をコンパクトに
+                            col_img, col_save = st.columns([2, 1])
                             
-                            if has_gcp and has_gsheet:
-                                if st.button("💾 Google Driveに保存", key="save_generated_image"):
-                                    with st.spinner("Google Driveに保存中..."):
-                                        try:
-                                            image_id = generate_image_id()
-                                            drive_file_id, drive_link_or_error = save_image_to_drive(
-                                                image_bytes, 
-                                                image_id, 
-                                                image_prompt,
-                                                st.session_state.get("cid", "manual_generation")
-                                            )
-                                            
-                                            if drive_file_id:
-                                                st.success(f"✅ 保存完了！")
-                                                st.info(f"整理番号: `{image_id}`")
-                                                if drive_link_or_error:
-                                                    st.markdown(f"🔗 [Google Driveで表示]({drive_link_or_error})")
-                                                
-                                                # ログ記録
-                                                save_log(
-                                                    st.session_state.get("cid", "manual_generation"),
-                                                    "manual_image_generation",
-                                                    "system",
-                                                    "image_save",
-                                                    f"手動画像生成: {image_content[:100]}...",
-                                                    image_id,
-                                                    drive_file_id,
-                                                    drive_link_or_error or ""
+                            with col_img:
+                                st.image(generated_image, caption=f"{style_options[selected_style]} ({selected_size})", width=300)
+                            
+                            with col_save:
+                                # Google Drive保存の条件をチェック
+                                has_gcp = st.secrets.get("gcp_service_account") is not None
+                                has_gsheet = st.secrets.get("gsheet_id") is not None
+                                
+                                if has_gcp and has_gsheet:
+                                    if st.button("💾 Drive保存", key="save_generated_image", use_container_width=True):
+                                        with st.spinner("保存中..."):
+                                            try:
+                                                image_id = generate_image_id()
+                                                drive_file_id, drive_link_or_error = save_image_to_drive(
+                                                    image_bytes, image_id, image_prompt,
+                                                    st.session_state.get("cid", "manual_generation")
                                                 )
-                                            else:
-                                                st.error(f"❌ 保存失敗: {drive_link_or_error}")
-                                        except Exception as e:
-                                            st.error(f"❌ 保存エラー: {e}")
-                            else:
-                                st.info("💡 Google Drive保存には認証設定が必要です")
+                                                
+                                                if drive_file_id:
+                                                    st.success("✅ 保存完了！")
+                                                    st.caption(f"ID: `{image_id}`")
+                                                    if drive_link_or_error:
+                                                        st.link_button("🔗 Drive表示", drive_link_or_error)
+                                                    
+                                                    # ログ記録
+                                                    save_log(
+                                                        st.session_state.get("cid", "manual_generation"),
+                                                        "manual_image_generation", "system", "image_save",
+                                                        f"手動画像生成: {image_content[:100]}...",
+                                                        image_id, drive_file_id, drive_link_or_error or ""
+                                                    )
+                                                else:
+                                                    st.error(f"❌ 保存失敗: {drive_link_or_error}")
+                                            except Exception as e:
+                                                st.error(f"❌ 保存エラー: {e}")
+                                else:
+                                    st.caption("� Drive保存には認証設定が必要")
                         else:
                             st.error("❌ 画像生成に失敗しました")
+
+    # --- アバター設定 ---
+    assistant_avatar_file = PERSONA_AVATARS.get(st.session_state.bot_type, "default_assistant.png")
+    user_avatar = st.session_state.get("user_avatar_data") if st.session_state.get("user_avatar_data") else "👤"
+    assistant_avatar = assistant_avatar_file if os.path.exists(assistant_avatar_file) else "🤖"
+    if assistant_avatar == "🤖":
+        st.info(f"アシスタントのアバター画像（{assistant_avatar_file}）が見つかりません。リポジトリのルートに画像を配置すると表示されます。")
+
+    # --- 履歴表示 ---
+    # 1. Google Sheetsから履歴を読み込み
+    if st.session_state.cid and not st.session_state.messages:
+        history_df = load_history(st.session_state.cid)
+        if not history_df.empty:
+            for _, row in history_df.iterrows():
+                st.session_state.messages.append({
+                    "role": row["role"],
+                    "content": row["content"],
+                    "name": row["name"]
+                })
+
+    # 2. st.session_state.messages を表示
+    for msg in st.session_state.messages:
+        role = msg["role"]
+        name = msg.get("name", role)
+        avatar = assistant_avatar if role == "assistant" else user_avatar
+        with st.chat_message(name, avatar=avatar):
+            # すべてのメッセージはテキストとして表示
+            st.markdown(msg["content"])
+
+    # --- チャット入力 ---
+    if user_input := st.chat_input("メッセージを入力してください"):
+        # ユーザーメッセージを即時表示
+        user_message = {"role": "user", "content": user_input, "name": st.session_state.name}
+        st.session_state.messages.append(user_message)
+        with st.chat_message(st.session_state.name, avatar=user_avatar):
+            st.markdown(user_input)
+
+        # ユーザーメッセージをログに保存
+        save_log(
+            st.session_state.cid or "(allocating...)",
+            st.session_state.bot_type,
+            "user",
+            st.session_state.name,
+            user_input
+        )
+
+        # --- Dify APIへリクエスト（画像生成キーワードチェックを削除） ---
+        api_key = PERSONA_API_KEYS.get(st.session_state.bot_type)
+        if not api_key:
+            st.error("選択されたペルソナのAPIキーが未設定です。")
+            st.stop()
+
+        headers = {"Authorization": f"Bearer {api_key}"}  # Content-Type は json= が自動付与
+
+        # 表示名→英数字・短めの安定IDに正規化（表示名自体はUI表示に使い、APIには安定IDを渡す）
+        import re, hashlib
+        raw_name = st.session_state.name or "guest"
+        user_id = re.sub(r'[^A-Za-z0-9_-]', '_', raw_name).strip('_')[:64] or hashlib.md5(raw_name.encode()).hexdigest()[:16]
+
+        # inputs は Dify 側の User Inputs とキー名を一致させること（未定義キーは送らない）
+        inputs = {}
+
+        payload = {
+            "inputs": inputs,
+            "query": user_input,
+            "user": user_id,
+            "response_mode": "blocking",
+        }
+        # ★初回は conversation_id を"送らない"（空文字は入れない）
+        if st.session_state.cid:
+            payload["conversation_id"] = st.session_state.cid
+
+        def call_dify(pyld):
+            return requests.post(DIFY_CHAT_URL, headers=headers, json=pyld, timeout=60)
+
+        with st.chat_message(st.session_state.bot_type, avatar=assistant_avatar):
+            answer = ""
+            try:
+                with st.spinner("AIが応答を生成中です..."):
+                    res = call_dify(payload)
+
+                    # --- 400 対策：会話IDが原因っぽいときだけ1回だけフォールバック ---
+                    if res.status_code == 400 and payload.get("conversation_id"):
+                        try:
+                            # JSON形式で解析を試行
+                            errj = res.json()
+                            emsg = (errj.get("message") or errj.get("error") or errj.get("detail") or "")
+                        except Exception:
+                            # JSONで解析できない場合はテキストとして扱う
+                            emsg = res.text
+                        # "conversation", "invalid" 等の語を含む場合に会話IDを外して再送
+                        if any(k in emsg.lower() for k in ["conversation", "invalid id", "must not be empty"]):
+                            bad_cid = payload.pop("conversation_id")
+                            res = call_dify(payload)
+                            if res.ok:
+                                st.warning(f"無効な会話IDだったため新規会話で再開しました（old={bad_cid}）")
+
+                    res.raise_for_status()
+                    
+                    # レスポンスの形式を判定して処理
+                    try:
+                        # JSON形式での解析を試行
+                        rj = res.json()
+                        answer = rj.get("answer", "⚠️ 応答がありませんでした。")
+                        
+                        # 新規会話IDが発行されたら保存
+                        new_cid = rj.get("conversation_id")
+                        if new_cid and not st.session_state.cid:
+                            st.session_state.cid = new_cid
+                            
+                    except (json.JSONDecodeError, ValueError):
+                        # JSON形式でない場合はテキストとして処理
+                        answer = res.text.strip()
+                        
+                        # テキスト応答から会話IDを抽出しようと試みる（オプション）
+                        # 例: "conversation_id: xxxx" のような形式がテキストに含まれている場合
+                        import re
+                        cid_match = re.search(r'conversation_id:\s*([a-zA-Z0-9\-_]+)', answer)
+                        if cid_match and not st.session_state.cid:
+                            st.session_state.cid = cid_match.group(1)
+                            # 会話IDが含まれている場合は、その部分を除去
+                            answer = re.sub(r'conversation_id:\s*[a-zA-Z0-9\-_]+\s*', '', answer).strip()
+
+                    # 応答をテキストのみ表示（画像生成は別セクションで実行）
+                    st.markdown(answer)
+
+            except requests.exceptions.HTTPError as e:
+                # エラーメッセージ本文をそのまま表示（原因の特定に有効）
+                body_text = getattr(e.response, "text", "(レスポンスボディ取得不可)")
+                st.error(f"⚠️ APIリクエストでHTTPエラーが発生しました (ステータスコード: {e.response.status_code})\n\n```\n{body_text}\n```")
+                answer = f"⚠️ APIリクエストでHTTPエラーが発生しました (ステータスコード: {e.response.status_code})\n\n```\n{body_text}\n```"
+            except requests.exceptions.RequestException as e:
+                st.error(f"⚠️ APIリクエストで通信エラーが発生しました: {e}")
+                answer = f"⚠️ APIリクエストで通信エラーが発生しました: {e}"
+            except Exception as e:
+                st.error(f"⚠️ 不明なエラーが発生しました: {e}")
+                answer = f"⚠️ 不明なエラーが発生しました: {e}"
+
+        # アシスタントの応答を保存
+        if answer:
+            assistant_message = {"role": "assistant", "content": answer, "name": st.session_state.bot_type}
+            st.session_state.messages.append(assistant_message)
+            save_log(
+                st.session_state.cid or "(allocating...)",
+                st.session_state.bot_type,
+                "assistant",
+                st.session_state.bot_type,
+                answer
+            )
+
+        # 画面を再実行して、共有リンクやダウンロードボタンを更新
+        st.rerun()
 
     # --- 操作ボタン ---
     st.markdown("---")
