@@ -155,7 +155,7 @@ def generate_image_with_dalle3(prompt):
     try:
         client = get_openai_client()
         if not client:
-            return None
+            return None, None
             
         response = client.images.generate(
             model="dall-e-3",
@@ -172,10 +172,92 @@ def generate_image_with_dalle3(prompt):
         img_response.raise_for_status()
         
         image = Image.open(io.BytesIO(img_response.content))
-        return image
+        image_bytes = img_response.content
+        
+        return image, image_bytes
         
     except Exception as e:
         st.error(f"画像生成中にエラーが発生しました: {e}")
+        return None, None
+
+def generate_image_id():
+    """画像の整理番号を生成（YYYY-MM-DD-HHMMSS-XXX形式）"""
+    from datetime import datetime
+    import random
+    
+    now = datetime.now()
+    timestamp = now.strftime("%Y-%m-%d-%H%M%S")
+    random_suffix = f"{random.randint(100, 999):03d}"
+    return f"{timestamp}-{random_suffix}"
+
+def save_image_to_drive(image_bytes, image_id, prompt, conversation_id):
+    """画像をGoogle Driveに保存"""
+    try:
+        drive_service = _drive_service()
+        if not drive_service:
+            return None, "Google Drive サービスが利用できません"
+        
+        # フォルダ確認・作成
+        folder_name = "MinonBC_AI_Images"
+        folder_id = get_or_create_drive_folder(drive_service, folder_name)
+        
+        if not folder_id:
+            return None, "フォルダの作成に失敗しました"
+        
+        # ファイル名を作成
+        filename = f"{image_id}_image.jpg"
+        
+        # メタデータを設定
+        file_metadata = {
+            'name': filename,
+            'parents': [folder_id],
+            'description': f'AI Generated Image\nPrompt: {prompt}\nConversation ID: {conversation_id}'
+        }
+        
+        # 画像をアップロード
+        from googleapiclient.http import MediaIoBaseUpload
+        media = MediaIoBaseUpload(io.BytesIO(image_bytes), mimetype='image/jpeg')
+        
+        file = drive_service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields='id,webViewLink,webContentLink'
+        ).execute()
+        
+        return file.get('id'), file.get('webViewLink')
+        
+    except Exception as e:
+        return None, f"Google Drive保存エラー: {e}"
+
+def get_or_create_drive_folder(drive_service, folder_name):
+    """Google Driveでフォルダを取得または作成"""
+    try:
+        # 既存フォルダを検索
+        results = drive_service.files().list(
+            q=f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder'",
+            fields="files(id, name)"
+        ).execute()
+        
+        folders = results.get('files', [])
+        
+        if folders:
+            return folders[0]['id']
+        
+        # フォルダが存在しない場合は作成
+        folder_metadata = {
+            'name': folder_name,
+            'mimeType': 'application/vnd.google-apps.folder'
+        }
+        
+        folder = drive_service.files().create(
+            body=folder_metadata,
+            fields='id'
+        ).execute()
+        
+        return folder.get('id')
+        
+    except Exception as e:
+        st.error(f"フォルダ操作エラー: {e}")
         return None
 
 def display_parsed_response(parsed_data):
@@ -205,10 +287,53 @@ def display_parsed_response(parsed_data):
                 st.info(f"プロンプト: {summary_item['image_prompt']}")
                 
                 with st.spinner("DALL-E 3で画像を生成しています..."):
-                    generated_image = generate_image_with_dalle3(summary_item["image_prompt"])
+                    generated_image, image_bytes = generate_image_with_dalle3(summary_item["image_prompt"])
                     
-                if generated_image:
-                    st.image(generated_image, caption=f"生成画像: {summary_item['image_prompt'][:50]}...", use_column_width=True)
+                if generated_image and image_bytes:
+                    st.image(generated_image, caption=f"生成画像: {summary_item['image_prompt'][:50]}...", use_container_width=True)
+                    
+                    # Google Driveに画像を保存
+                    if st.secrets.get("gcp_service_account") and st.secrets.get("gsheet_id"):
+                        with st.spinner("Google Driveに画像を保存しています..."):
+                            image_id = generate_image_id()
+                            drive_file_id, drive_link_or_error = save_image_to_drive(
+                                image_bytes, 
+                                image_id, 
+                                summary_item["image_prompt"],
+                                st.session_state.get("cid", "unknown")
+                            )
+                            
+                            if drive_file_id:
+                                st.success(f"✅ **画像をGoogle Driveに保存しました**")
+                                st.info(f"**整理番号:** `{image_id}`")
+                                if drive_link_or_error:
+                                    st.markdown(f"🔗 [Google Driveで表示]({drive_link_or_error})")
+                                
+                                # 画像情報をGoogle Sheetsに記録
+                                save_log(
+                                    st.session_state.get("cid", "unknown"),
+                                    st.session_state.get("bot_type", "unknown"),
+                                    "system",
+                                    "image_save",
+                                    f"画像保存: {summary_item['image_prompt'][:100]}...",
+                                    image_id,
+                                    drive_file_id,
+                                    drive_link_or_error or ""
+                                )
+                                
+                                # セッション状態に画像情報を保存（再表示用）
+                                if "saved_images" not in st.session_state:
+                                    st.session_state.saved_images = []
+                                st.session_state.saved_images.append({
+                                    "image_id": image_id,
+                                    "drive_link": drive_link_or_error,
+                                    "prompt": summary_item["image_prompt"]
+                                })
+                            else:
+                                st.error(f"❌ 画像保存に失敗しました: {drive_link_or_error}")
+                    else:
+                        st.info("💡 Google Drive保存機能が無効です。SecretsにGoogle認証情報を設定すると自動保存されます。")
+                        
                 else:
                     st.error("画像の生成に失敗しました。")
     else:
@@ -216,21 +341,26 @@ def display_parsed_response(parsed_data):
         st.markdown(parsed_data["raw_text"])
 
 # =========================
-# Google Sheets 接続ユーティリティ
+# Google Sheets & Google Drive 接続ユーティリティ
 # =========================
 def _get_sa_dict():
     """Secretsの gcp_service_account から dict を返す（JSON文字列/TOMLテーブル両対応）"""
     if "gcp_service_account" not in st.secrets:
         return None
-    raw = st.secrets["gcp_service_account"]
-    if isinstance(raw, str):
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError:
-            # private_key の実改行を \n に自動補正して再トライ（貼付ミス救済）
-            fixed = raw.replace("\r\n", "\n").replace("\n", "\\n")
-            return json.loads(fixed)
-    return dict(raw)
+    try:
+        raw = st.secrets["gcp_service_account"]
+        if isinstance(raw, str):
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                # private_key の実改行を \n に自動補正して再トライ（貼付ミス救済）
+                fixed = raw.replace("\r\n", "\n").replace("\n", "\\n")
+                return json.loads(fixed)
+        return dict(raw)
+    except Exception as e:
+        if st.secrets.get("DEBUG_MODE", False):
+            st.error(f"サービスアカウント情報の読み込みエラー: {e}")
+        return None
 
 @st.cache_resource
 def _gs_client():
@@ -243,9 +373,30 @@ def _gs_client():
         st.error("`gcp_service_account` がSecretsに設定されていません。")
         st.stop()
 
-    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+    # Google SheetsとGoogle Driveの両方にアクセスするためのスコープ
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive.file"
+    ]
     creds = Credentials.from_service_account_info(sa_info, scopes=scopes)
     return gspread.authorize(creds)
+
+@st.cache_resource
+def _drive_service():
+    """Google Drive API サービスを返す（キャッシュする）"""
+    from googleapiclient.discovery import build
+    from google.oauth2.service_account import Credentials
+
+    sa_info = _get_sa_dict()
+    if not sa_info:
+        return None
+
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive.file"
+    ]
+    creds = Credentials.from_service_account_info(sa_info, scopes=scopes)
+    return build('drive', 'v3', credentials=creds)
 
 def _open_sheet():
     """chat_logs ワークシートを開く（なければ作成）。権限/IDエラーはUI表示して停止。"""
@@ -275,18 +426,30 @@ def _open_sheet():
 
     try:
         ws = sh.worksheet("chat_logs")
+        # 既存のシートに新しいカラムが必要かチェック
+        headers = ws.row_values(1)
+        if "image_id" not in headers:
+            # 新しいカラムを追加
+            current_cols = len(headers)
+            ws.update_cell(1, current_cols + 1, "image_id")
+            ws.update_cell(1, current_cols + 2, "drive_file_id")
+            ws.update_cell(1, current_cols + 3, "drive_link")
     except WorksheetNotFound:
-        ws = sh.add_worksheet(title="chat_logs", rows=1000, cols=10)
-        ws.append_row(["timestamp", "conversation_id", "bot_type", "role", "name", "content"])
+        ws = sh.add_worksheet(title="chat_logs", rows=1000, cols=12)
+        ws.append_row(["timestamp", "conversation_id", "bot_type", "role", "name", "content", "image_id", "drive_file_id", "drive_link"])
     return ws
 
-def save_log(conversation_id: str, bot_type: str, role: str, name: str, content: str):
+def save_log(conversation_id: str, bot_type: str, role: str, name: str, content: str, image_id: str = "", drive_file_id: str = "", drive_link: str = ""):
     """一行追記（指数バックオフの簡易リトライ付き）"""
     from gspread.exceptions import APIError
+    
+    # Google Sheets機能が無効な場合はスキップ
+    if "gcp_service_account" not in st.secrets or "gsheet_id" not in st.secrets:
+        return
 
     try:
         ws = _open_sheet()
-        row = [datetime.now(timezone.utc).isoformat(), conversation_id, bot_type, role, name, content]
+        row = [datetime.now(timezone.utc).isoformat(), conversation_id, bot_type, role, name, content, image_id, drive_file_id, drive_link]
 
         for i in range(5):
             try:
@@ -300,17 +463,26 @@ def save_log(conversation_id: str, bot_type: str, role: str, name: str, content:
                 raise
         raise RuntimeError("Google Sheets への保存に連続失敗しました。")
     except Exception as e:
-        st.warning(f"Google Sheetsへのログ保存中にエラーが発生しました: {e}")
+        # より詳細なエラー情報を表示
+        error_type = type(e).__name__
+        st.warning(f"Google Sheetsへのログ保存中にエラーが発生しました ({error_type}): {e}")
+        # デバッグ用（開発時のみ）
+        if st.secrets.get("DEBUG_MODE", False):
+            st.error(f"詳細エラー: {e}", icon="🐛")
 
 @st.cache_data(ttl=60)  # ライブ更新のため短めのTTL
 def load_history(conversation_id: str) -> pd.DataFrame:
     """指定された会話IDの履歴をGoogle Sheetsから読み込む"""
+    # Google Sheets機能が無効な場合は空のDataFrameを返す
+    if "gcp_service_account" not in st.secrets or "gsheet_id" not in st.secrets:
+        return pd.DataFrame(columns=["timestamp", "conversation_id", "bot_type", "role", "name", "content", "image_id", "drive_file_id", "drive_link"])
+        
     try:
         ws = _open_sheet()
         data = ws.get_all_records()
         df = pd.DataFrame(data)
         if df.empty:
-            return pd.DataFrame(columns=["timestamp", "conversation_id", "bot_type", "role", "name", "content"])
+            return pd.DataFrame(columns=["timestamp", "conversation_id", "bot_type", "role", "name", "content", "image_id", "drive_file_id", "drive_link"])
 
         df_filtered = df[df["conversation_id"] == conversation_id].copy()
         if not df_filtered.empty and "timestamp" in df_filtered.columns:
@@ -318,13 +490,14 @@ def load_history(conversation_id: str) -> pd.DataFrame:
             df_filtered = df_filtered.sort_values("timestamp")
         return df_filtered
     except Exception as e:
-        st.error(f"Google Sheetsからの履歴読み込み中にエラーが発生しました: {e}")
-        return pd.DataFrame()
+        error_type = type(e).__name__
+        st.warning(f"Google Sheetsからの履歴読み込み中にエラーが発生しました ({error_type}): {e}")
+        return pd.DataFrame(columns=["timestamp", "conversation_id", "bot_type", "role", "name", "content", "image_id", "drive_file_id", "drive_link"])
 
 # =========================
 # Streamlit UI
 # =========================
-st.set_page_config(page_title="ひらめ１号との対話", layout="centered")
+st.set_page_config(page_title="ミノンBC AIファンチャット", layout="centered")
 
 # --- session_stateの初期化 ---
 def init_session_state():
@@ -366,8 +539,57 @@ if st.session_state.page == "login":
     if not st.secrets.get("OPENAI_API_KEY"):
         st.warning("⚠️ OpenAI APIキーが設定されていません。画像生成機能を使用するには、Streamlit CloudのSecretsに `OPENAI_API_KEY` を設定してください。")
     
+    # Google Sheets設定の確認
+    if not st.secrets.get("gcp_service_account") or not st.secrets.get("gsheet_id"):
+        st.info("💡 Google Sheets設定が不完全です。チャット履歴の永続化機能は無効になります。")
+    
+    # デバッグ情報の表示（Google API設定確認用）
+    if st.secrets.get("gcp_service_account") and st.secrets.get("gsheet_id"):
+        with st.expander("🔧 Google API設定確認", expanded=False):
+            try:
+                sa_info = json.loads(st.secrets["gcp_service_account"]) if isinstance(st.secrets["gcp_service_account"], str) else dict(st.secrets["gcp_service_account"])
+                st.write("**サービスアカウント email:**")
+                st.code(sa_info.get("client_email", "不明"))
+                st.write("**プロジェクトID:**")
+                st.code(sa_info.get("project_id", "不明"))
+                st.write("**スプレッドシートID:**")
+                st.code(st.secrets["gsheet_id"])
+                
+                st.markdown("### 📋 必要な設定")
+                st.info("1️⃣ **Google Cloud Console**でAPI有効化:\n- Google Sheets API ✅\n- Google Drive API ✅")
+                st.info("2️⃣ **スプレッドシート共有**:\n上記のサービスアカウントemailを「編集者」権限で共有")
+                st.info("3️⃣ **Google Drive権限**:\nサービスアカウントが画像保存用フォルダを作成できます")
+                
+                # API接続テスト
+                st.markdown("### 🔍 API接続テスト")
+                if st.button("Google Sheets API テスト"):
+                    try:
+                        ws = _open_sheet()
+                        st.success("✅ Google Sheets API: 接続成功")
+                    except Exception as e:
+                        st.error(f"❌ Google Sheets API: 接続失敗 - {e}")
+                        
+                if st.button("Google Drive API テスト"):
+                    try:
+                        drive_service = _drive_service()
+                        if drive_service:
+                            # 簡単なテスト（フォルダ検索）
+                            results = drive_service.files().list(
+                                q="mimeType='application/vnd.google-apps.folder'",
+                                pageSize=1,
+                                fields="files(id, name)"
+                            ).execute()
+                            st.success("✅ Google Drive API: 接続成功")
+                        else:
+                            st.error("❌ Google Drive API: サービス取得失敗")
+                    except Exception as e:
+                        st.error(f"❌ Google Drive API: 接続失敗 - {e}")
+                        
+            except Exception as e:
+                st.error(f"サービスアカウント情報の読み取りエラー: {e}")
+    
     # JSON出力フォーマットの説明
-    with st.expander("📖 Dify出力フォーマットについて"):
+    with st.expander("📖 Dify出力フォーマットについて", expanded=False):
         st.markdown("""
         **JSON形式での出力**
         
@@ -403,7 +625,7 @@ if st.session_state.page == "login":
     with st.form("user_info_form"):
         name = st.text_input("あなたの表示名", value=st.session_state.name or "")
         bot_type = st.selectbox(
-            "対話するひらめ１号",
+            "対話するAIペルソナ",
             list(PERSONA_API_KEYS.keys()),
             index=(list(PERSONA_API_KEYS.keys()).index(st.session_state.bot_type)
                    if st.session_state.bot_type in PERSONA_API_KEYS else 0),
@@ -645,5 +867,3 @@ else:
     if st.button("最初のページに戻る"):
         init_session_state()
         st.rerun()
-
-
