@@ -229,11 +229,24 @@ def save_image_to_drive(image_bytes, image_id, prompt, conversation_id):
             from googleapiclient.http import MediaIoBaseUpload
             media = MediaIoBaseUpload(io.BytesIO(image_bytes), mimetype='image/jpeg')
             
-            file = drive_service.files().create(
-                body=file_metadata,
-                media_body=media,
-                fields='id,webViewLink,webContentLink'
-            ).execute()
+            # 共有ドライブIDが設定されているかチェック
+            shared_drive_id = st.secrets.get("shared_drive_id")
+            
+            if shared_drive_id:
+                # 共有ドライブ対応でアップロード
+                file = drive_service.files().create(
+                    body=file_metadata,
+                    media_body=media,
+                    fields='id,webViewLink,webContentLink',
+                    supportsAllDrives=True
+                ).execute()
+            else:
+                # 従来の個人ドライブ方式
+                file = drive_service.files().create(
+                    body=file_metadata,
+                    media_body=media,
+                    fields='id,webViewLink,webContentLink'
+                ).execute()
             
             file_id = file.get('id')
             web_view_link = file.get('webViewLink')
@@ -255,38 +268,84 @@ def save_image_to_drive(image_bytes, image_id, prompt, conversation_id):
         return None, error_msg
 
 def get_or_create_drive_folder(drive_service, folder_name):
-    """Google Driveでフォルダを取得または作成"""
+    """Google Driveでフォルダを取得または作成（共有ドライブ対応）"""
     try:
         st.info(f"🔍 フォルダ '{folder_name}' を検索中...")
-        # 既存フォルダを検索
-        results = drive_service.files().list(
-            q=f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder'",
-            fields="files(id, name)"
-        ).execute()
         
-        folders = results.get('files', [])
-        st.info(f"📁 検索結果: {len(folders)}個のフォルダが見つかりました")
+        # 共有ドライブIDがSecretsに設定されているかチェック
+        shared_drive_id = st.secrets.get("shared_drive_id")
         
-        if folders:
-            folder_id = folders[0]['id']
-            st.info(f"✅ 既存フォルダを使用: {folder_id}")
+        if shared_drive_id:
+            st.info(f"📁 共有ドライブを使用: {shared_drive_id}")
+            # 共有ドライブ内でフォルダを検索
+            results = drive_service.files().list(
+                q=f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder' and parents in '{shared_drive_id}'",
+                fields="files(id, name)",
+                driveId=shared_drive_id,
+                includeItemsFromAllDrives=True,
+                supportsAllDrives=True,
+                corpora='drive'
+            ).execute()
+            
+            folders = results.get('files', [])
+            st.info(f"📁 検索結果: {len(folders)}個のフォルダが見つかりました")
+            
+            if folders:
+                folder_id = folders[0]['id']
+                st.info(f"✅ 既存フォルダを使用: {folder_id}")
+                return folder_id
+            
+            # フォルダが存在しない場合は共有ドライブ内に作成
+            st.info("📁 共有ドライブ内に新しいフォルダを作成中...")
+            folder_metadata = {
+                'name': folder_name,
+                'mimeType': 'application/vnd.google-apps.folder',
+                'parents': [shared_drive_id]
+            }
+            
+            folder = drive_service.files().create(
+                body=folder_metadata,
+                fields='id',
+                supportsAllDrives=True
+            ).execute()
+            
+            folder_id = folder.get('id')
+            st.success(f"✅ 共有ドライブ内にフォルダを作成: {folder_id}")
             return folder_id
         
-        # フォルダが存在しない場合は作成
-        st.info("📁 新しいフォルダを作成中...")
-        folder_metadata = {
-            'name': folder_name,
-            'mimeType': 'application/vnd.google-apps.folder'
-        }
-        
-        folder = drive_service.files().create(
-            body=folder_metadata,
-            fields='id'
-        ).execute()
-        
-        folder_id = folder.get('id')
-        st.info(f"✅ フォルダ作成成功: {folder_id}")
-        return folder_id
+        else:
+            # 従来の個人ドライブ方式（エラーが発生する可能性あり）
+            st.warning("⚠️ 共有ドライブIDが未設定です。個人ドライブでの保存を試行します...")
+            
+            # 既存フォルダを検索
+            results = drive_service.files().list(
+                q=f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder'",
+                fields="files(id, name)"
+            ).execute()
+            
+            folders = results.get('files', [])
+            st.info(f"📁 検索結果: {len(folders)}個のフォルダが見つかりました")
+            
+            if folders:
+                folder_id = folders[0]['id']
+                st.info(f"✅ 既存フォルダを使用: {folder_id}")
+                return folder_id
+            
+            # フォルダが存在しない場合は作成
+            st.info("📁 新しいフォルダを作成中...")
+            folder_metadata = {
+                'name': folder_name,
+                'mimeType': 'application/vnd.google-apps.folder'
+            }
+            
+            folder = drive_service.files().create(
+                body=folder_metadata,
+                fields='id'
+            ).execute()
+            
+            folder_id = folder.get('id')
+            st.info(f"✅ フォルダ作成成功: {folder_id}")
+            return folder_id
         
     except Exception as e:
         error_msg = f"フォルダ操作エラー: {e}"

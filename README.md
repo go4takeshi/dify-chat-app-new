@@ -47,6 +47,20 @@ streamlit run app.py
   - `gcp_service_account`（Google Service Account の JSON文字列、Google Sheets に保存する場合）
   - `gsheet_id`（Google Sheets のキー）
   - `drive_folder_name`（画像保存用Google Driveフォルダ名、省略時は "MinonBC_AI_Images"）
+  - `shared_drive_id`（**推奨**: 共有ドライブのID、Service Account制限回避用）
+
+### ⚠️ 重要: Google Drive保存について
+
+**Service Accountの制限により、個人のGoogle Driveには直接保存できません。**
+以下のいずれかの方法を選択してください：
+
+#### 方法1: 共有ドライブ使用（推奨）
+1. Google Driveで共有ドライブを作成
+2. Service AccountにEditor権限を付与
+3. 共有ドライブのIDを`shared_drive_id`に設定
+
+#### 方法2: 画像保存機能を無効化
+- OpenAI APIキーのみ設定して画像生成のみ利用
 
 ### Secrets設定例
 ```toml
@@ -56,6 +70,7 @@ PERSONA_2_KEY = "app-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 OPENAI_API_KEY = "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 gsheet_id = "1AbCdEfGhIjKlMnOpQrStUvWxYz123456789"
 drive_folder_name = "AI画像_2024年プロジェクト"
+shared_drive_id = "0BxxxxxxxxxxxxxxxxxFUk9PVA"  # 共有ドライブID（推奨）
 gcp_service_account = """
 {
   "type": "service_account",
@@ -64,6 +79,11 @@ gcp_service_account = """
 }
 """
 ```
+
+### 共有ドライブIDの取得方法
+1. Google Driveで共有ドライブを作成
+2. 共有ドライブを開いてURL確認: `https://drive.google.com/drive/folders/[ここがID]`
+3. IDをコピーして`shared_drive_id`に設定
 
 ## 画像生成機能の使い方
 1. **Difyでアイディア抽出**
