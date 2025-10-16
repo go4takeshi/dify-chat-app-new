@@ -324,7 +324,7 @@ def load_history(conversation_id: str) -> pd.DataFrame:
 # =========================
 # Streamlit UI
 # =========================
-st.set_page_config(page_title="ミノンBC AIファンチャット", layout="centered")
+st.set_page_config(page_title="ひらめ１号との対話", layout="centered")
 
 # --- session_stateの初期化 ---
 def init_session_state():
@@ -645,3 +645,4 @@ else:
     if st.button("最初のページに戻る"):
         init_session_state()
         st.rerun()
+
