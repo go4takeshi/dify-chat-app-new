@@ -80,7 +80,10 @@ def should_generate_image(user_input, bot_response):
     """ユーザーの入力に画像生成の指示が含まれているかチェック"""
     image_keywords = [
         "画像にして", "画像を生成", "画像を作って", "イメージにして", "絵にして",
-        "図にして", "ビジュアル化", "画像で表現", "画像化", "絵で表現"
+        "図にして", "ビジュアル化", "画像で表現", "画像化", "絵で表現",
+        # 追加キーワード
+        "描いて", "イラストにして", "チャートにして", "グラフにして", "写真風に",
+        "アートにして", "スケッチにして", "デザインして"
     ]
     
     # ユーザー入力に画像生成キーワードが含まれているかチェック
@@ -89,23 +92,69 @@ def should_generate_image(user_input, bot_response):
             return True
     return False
 
-def create_image_prompt_from_text(text_content):
+def parse_image_specifications(user_input):
+    """ユーザー入力から画像スタイルとサイズの指定を解析"""
+    specifications = {
+        "style": "professional",  # デフォルト
+        "size": "1024x1024"      # デフォルト
+    }
+    
+    # スタイル指定の解析（負荷：文字列検索のみ）
+    style_patterns = {
+        "シンプル": "minimalist",
+        "ミニマル": "minimalist", 
+        "写真風": "photorealistic",
+        "アート": "artistic",
+        "スケッチ": "sketch",
+        "チャート": "chart",
+        "グラフ": "diagram",
+        "ビジネス": "business"
+    }
+    
+    for japanese, english in style_patterns.items():
+        if japanese in user_input:
+            specifications["style"] = english
+            break
+    
+    # サイズ指定の解析（負荷：文字列検索のみ）
+    if "小さ" in user_input or "小さめ" in user_input:
+        specifications["size"] = "512x512"
+    elif "大き" in user_input or "大きめ" in user_input:
+        specifications["size"] = "1792x1024"
+    elif "正方形" in user_input:
+        specifications["size"] = "1024x1024"
+    elif "横長" in user_input:
+        specifications["size"] = "1792x1024"
+    elif "縦長" in user_input:
+        specifications["size"] = "1024x1792"
+    
+    return specifications
+
+def create_image_prompt_from_text(text_content, style="professional"):
     """テキスト内容から画像生成用のプロンプトを作成"""
     # テキストの長さを制限（DALL-E 3のプロンプト制限対応）
     if len(text_content) > 300:
         text_content = text_content[:300] + "..."
     
-    # 日本語の内容を英語の画像生成プロンプトに変換
-    # アイデアや概念的な内容を視覚化するためのプロンプト
-    prompt = f"""Create a professional, modern illustration that visually represents the following concept or idea: 
+    # スタイル別のプロンプトテンプレート（負荷：辞書検索のみ）
+    style_templates = {
+        "minimalist": "Create a clean, minimalist illustration with simple lines and minimal colors that represents: {content}",
+        "photorealistic": "Create a photorealistic image that accurately depicts: {content}",
+        "artistic": "Create an artistic, creative illustration with vibrant colors that represents: {content}",
+        "sketch": "Create a hand-drawn sketch style illustration that shows: {content}",
+        "chart": "Create a professional chart or diagram that visualizes: {content}",
+        "diagram": "Create a clear, professional diagram that explains: {content}",
+        "business": "Create a professional business presentation style illustration for: {content}",
+        "professional": "Create a professional, modern illustration that visually represents: {content}. Style: Clean, professional design with clear visual metaphors. Use bright, engaging colors."
+    }
     
-    {text_content}
-    
-    Style: Clean, minimalist, professional design with clear visual metaphors. Use bright, engaging colors. Make it suitable for business presentation or educational content."""
+    # スタイルに応じたプロンプト生成（負荷：文字列フォーマットのみ）
+    template = style_templates.get(style, style_templates["professional"])
+    prompt = template.format(content=text_content)
     
     return prompt
 
-def generate_image_with_dalle3(prompt):
+def generate_image_with_dalle3(prompt, size="1024x1024"):
     """DALL-E 3を使用して画像を生成"""
     try:
         client = get_openai_client()
@@ -115,7 +164,7 @@ def generate_image_with_dalle3(prompt):
         response = client.images.generate(
             model="dall-e-3",
             prompt=prompt,
-            size="1024x1024",
+            size=size,  # サイズ指定を反映
             quality="standard",
             n=1,
         )
@@ -225,16 +274,19 @@ def display_response_with_conditional_image(bot_response, user_input, generate_i
     
     # 画像生成が指示されている場合
     if generate_image:
+        # ユーザー入力から画像仕様を解析（負荷：軽微な文字列処理のみ）
+        specs = parse_image_specifications(user_input)
+        
         st.markdown("🎨 **画像を生成中...**")
-        st.info(f"テキスト内容を元に画像を生成します...")
+        st.info(f"テキスト内容を元に画像を生成します（スタイル: {specs['style']}, サイズ: {specs['size']}）")
         
         with st.spinner("DALL-E 3で画像を生成しています..."):
-            # テキストから画像生成用プロンプトを作成
-            image_prompt = create_image_prompt_from_text(bot_response)
-            generated_image, image_bytes = generate_image_with_dalle3(image_prompt)
+            # テキストから画像生成用プロンプトを作成（スタイル指定付き）
+            image_prompt = create_image_prompt_from_text(bot_response, specs['style'])
+            generated_image, image_bytes = generate_image_with_dalle3(image_prompt, specs['size'])
             
         if generated_image and image_bytes:
-            st.image(generated_image, caption=f"生成画像（元テキストより）", use_container_width=True)
+            st.image(generated_image, caption=f"生成画像（{specs['style']}スタイル, {specs['size']}）", use_container_width=True)
             
             # Google Driveに画像を保存
             if st.secrets.get("gcp_service_account") and st.secrets.get("gsheet_id"):
@@ -548,25 +600,43 @@ if st.session_state.page == "login":
         チャット中に以下のキーワードを使用すると、ボットの応答内容を元に自動的に画像が生成されます：
         
         **画像生成キーワード:**
-        - 「画像にして」
-        - 「画像を生成」
-        - 「画像を作って」
-        - 「イメージにして」
-        - 「絵にして」
-        - 「図にして」
-        - 「ビジュアル化」
-        - 「画像で表現」
-        - 「画像化」
-        - 「絵で表現」
+        - 「画像にして」「画像を生成」「画像を作って」
+        - 「イメージにして」「絵にして」「図にして」
+        - 「ビジュアル化」「画像で表現」「画像化」「絵で表現」
+        - 「描いて」「イラストにして」「チャートにして」
+        - 「グラフにして」「写真風に」「アートにして」
+        - 「スケッチにして」「デザインして」
+        
+        **スタイル指定キーワード:**
+        - 「シンプルな」「ミニマルな」→ ミニマリストスタイル
+        - 「写真風の」→ フォトリアリスティック
+        - 「アート風の」→ アーティスティック
+        - 「スケッチ風の」→ 手描きスケッチ
+        - 「チャート」「グラフ」→ 図表スタイル
+        - 「ビジネス用の」→ ビジネスプレゼン風
+        
+        **サイズ指定キーワード:**
+        - 「小さな」「小さめの」→ 512×512 (コスト削減)
+        - 「大きな」「大きめの」→ 1792×1024
+        - 「正方形の」→ 1024×1024 (デフォルト)
+        - 「横長の」→ 1792×1024
+        - 「縦長の」→ 1024×1792
         
         **使用例:**
         ```
-        ユーザー: 「新商品のアイデアを画像にして」
-        → テキスト応答 + 画像生成・表示
+        ユーザー: 「新商品のアイデアをシンプルな図にして」
+        → ミニマリストスタイルの画像生成
+        
+        ユーザー: 「売上データを小さめのチャートで表現して」
+        → 512×512のチャート形式で生成
+        
+        ユーザー: 「企画書用に大きめの写真風画像を作って」
+        → 1792×1024のフォトリアリスティック画像
         ```
         
         **特徴:**
         - DALL-E 3による高品質な画像生成
+        - スタイルとサイズの柔軟な指定
         - Google Driveへの自動保存（設定済みの場合）
         - 整理番号による画像管理
         - コスト効率的（明示的な指示がある場合のみ生成）
@@ -672,7 +742,7 @@ elif st.session_state.page == "chat":
             user_input
         )
 
-        # --- Dify APIへリクエスト（安定版） ---
+        # --- Dify APIへリクエスト（テキスト応答対応版） ---
         api_key = PERSONA_API_KEYS.get(st.session_state.bot_type)
         if not api_key:
             st.error("選択されたペルソナのAPIキーが未設定です。")
@@ -710,9 +780,11 @@ elif st.session_state.page == "chat":
                     # --- 400 対策：会話IDが原因っぽいときだけ1回だけフォールバック ---
                     if res.status_code == 400 and payload.get("conversation_id"):
                         try:
+                            # JSON形式で解析を試行
                             errj = res.json()
                             emsg = (errj.get("message") or errj.get("error") or errj.get("detail") or "")
                         except Exception:
+                            # JSONで解析できない場合はテキストとして扱う
                             emsg = res.text
                         # "conversation", "invalid" 等の語を含む場合に会話IDを外して再送
                         if any(k in emsg.lower() for k in ["conversation", "invalid id", "must not be empty"]):
@@ -722,13 +794,30 @@ elif st.session_state.page == "chat":
                                 st.warning(f"無効な会話IDだったため新規会話で再開しました（old={bad_cid}）")
 
                     res.raise_for_status()
-                    rj = res.json()
-                    answer = rj.get("answer", "⚠️ 応答がありませんでした。")
-
-                    # 新規会話IDが発行されたら保存
-                    new_cid = rj.get("conversation_id")
-                    if new_cid and not st.session_state.cid:
-                        st.session_state.cid = new_cid
+                    
+                    # レスポンスの形式を判定して処理
+                    try:
+                        # JSON形式での解析を試行
+                        rj = res.json()
+                        answer = rj.get("answer", "⚠️ 応答がありませんでした。")
+                        
+                        # 新規会話IDが発行されたら保存
+                        new_cid = rj.get("conversation_id")
+                        if new_cid and not st.session_state.cid:
+                            st.session_state.cid = new_cid
+                            
+                    except (json.JSONDecodeError, ValueError):
+                        # JSON形式でない場合はテキストとして処理
+                        answer = res.text.strip()
+                        
+                        # テキスト応答から会話IDを抽出しようと試みる（オプション）
+                        # 例: "conversation_id: xxxx" のような形式がテキストに含まれている場合
+                        import re
+                        cid_match = re.search(r'conversation_id:\s*([a-zA-Z0-9\-_]+)', answer)
+                        if cid_match and not st.session_state.cid:
+                            st.session_state.cid = cid_match.group(1)
+                            # 会話IDが含まれている場合は、その部分を除去
+                            answer = re.sub(r'conversation_id:\s*[a-zA-Z0-9\-_]+\s*', '', answer).strip()
 
                     # 画像生成が必要かチェック
                     should_create_image = should_generate_image(user_input, answer)
@@ -786,5 +875,3 @@ else:
     if st.button("最初のページに戻る"):
         init_session_state()
         st.rerun()
-
-
