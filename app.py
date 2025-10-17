@@ -2,6 +2,7 @@
 import os
 import json
 import time
+import random
 from datetime import datetime, timezone
 from urllib.parse import urlencode
 
@@ -73,9 +74,45 @@ PERSONA_AVATARS = {
     "③ひらめ１号_g3": "persona_3.jpg",
 }
 
-# =========================
-# JSON解析とDALL-E 3機能
-# =========================
+def validate_response_quality(response_text):
+    """レスポンスの品質をチェック"""
+    if not response_text or len(response_text.strip()) < 5:
+        return False, "レスポンスが短すぎます"
+    
+    # 文字化けチェック（中国語文字の過度な混入）
+    chinese_chars = sum(1 for char in response_text if '\u4e00' <= char <= '\u9fff')
+    total_chars = len(response_text)
+    if total_chars > 0 and chinese_chars / total_chars > 0.3:  # 30%以上が中国語
+        return False, "レスポンスに中国語が多すぎます"
+    
+    # 同じフレーズの繰り返しチェック
+    words = response_text.split()
+    if len(words) > 10:
+        # 5文字以上の連続する同じ単語グループをチェック
+        for i in range(len(words) - 4):
+            phrase = ' '.join(words[i:i+5])
+            remaining_text = ' '.join(words[i+5:])
+            if phrase in remaining_text:
+                return False, "同じ内容の繰り返しが検出されました"
+    
+    return True, "OK"
+
+def clean_response_text(text):
+    """レスポンステキストのクリーニング"""
+    if not text:
+        return text
+    
+    # 改行の正規化
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+    
+    # 過度な改行を削減
+    import re
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    
+    # 文字化け可能性のある文字を除去
+    text = re.sub(r'[^\u0020-\u007E\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FAF\uFF01-\uFF60\n\r\t]', '', text)
+    
+    return text.strip()
 def should_generate_image(user_input, bot_response):
     """ユーザーの入力に画像生成の指示が含まれているかチェック"""
     image_keywords = [
@@ -879,6 +916,23 @@ elif st.session_state.page == "chat":
                 st.write(f"**{persona}**: `{cid or '(未発行)'}` {status}")
     
     st.info(f"会話ID: `{cid_show}`")
+    
+    # 多人数利用時の注意メッセージ
+    with st.expander("🚀 多人数利用時の注意事項", expanded=False):
+        st.markdown("""
+        **システムの安定性を保つため、以下にご注意ください：**
+        
+        - ⏱️ **レスポンス時間**: 多人数利用時は通常より応答に時間がかかる場合があります
+        - 🔄 **自動再試行**: 品質の低い応答は自動的に再試行されます
+        - 🎯 **同時アクセス制限**: 同時に大量のリクエストを送信しないでください
+        - 📊 **品質チェック**: レスポンスの品質を自動チェックし、必要に応じて改善します
+        
+        **問題が発生した場合：**
+        - 「新しい会話を始める」ボタンで会話をリセット
+        - ブラウザをリフレッシュして再接続
+        - しばらく時間をおいてから再度アクセス
+        """)
+    
     if st.session_state.cid:
         params = {
             "page": "chat",
@@ -1118,6 +1172,11 @@ elif st.session_state.page == "chat":
 
     # --- チャット入力 ---
     if user_input := st.chat_input("メッセージを入力してください"):
+        # 負荷分散のためのランダム遅延（多人数利用時の同時アクセスを避ける）
+        import random
+        delay = random.uniform(0.1, 0.5)  # 0.1〜0.5秒のランダム遅延
+        time.sleep(delay)
+        
         # ユーザーメッセージを即時表示
         user_message = {"role": "user", "content": user_input, "name": st.session_state.name}
         st.session_state.messages.append(user_message)
@@ -1159,8 +1218,28 @@ elif st.session_state.page == "chat":
         if st.session_state.cid:
             payload["conversation_id"] = st.session_state.cid
 
-        def call_dify(pyld):
-            return requests.post(DIFY_CHAT_URL, headers=headers, json=pyld, timeout=60)
+        def call_dify(pyld, retry_count=0):
+            """Dify APIを呼び出す（リトライ機能付き）"""
+            max_retries = 3
+            base_timeout = 30  # 短縮
+            timeout = base_timeout + (retry_count * 10)  # リトライ時はタイムアウトを延長
+            
+            try:
+                return requests.post(DIFY_CHAT_URL, headers=headers, json=pyld, timeout=timeout)
+            except requests.exceptions.Timeout:
+                if retry_count < max_retries:
+                    st.warning(f"⏱️ API応答がタイムアウトしました。再試行中... ({retry_count + 1}/{max_retries})")
+                    time.sleep(2 ** retry_count)  # 指数バックオフ
+                    return call_dify(pyld, retry_count + 1)
+                else:
+                    raise
+            except Exception as e:
+                if retry_count < max_retries:
+                    st.warning(f"⚠️ API通信エラーが発生しました。再試行中... ({retry_count + 1}/{max_retries})")
+                    time.sleep(2 ** retry_count)
+                    return call_dify(pyld, retry_count + 1)
+                else:
+                    raise
 
         with st.chat_message(st.session_state.bot_type, avatar=assistant_avatar):
             answer = ""
@@ -1192,6 +1271,32 @@ elif st.session_state.page == "chat":
                         rj = res.json()
                         answer = rj.get("answer", "⚠️ 応答がありませんでした。")
                         
+                        # レスポンス品質チェック
+                        is_valid, quality_message = validate_response_quality(answer)
+                        if not is_valid:
+                            st.warning(f"⚠️ レスポンス品質の問題を検出: {quality_message}")
+                            # 品質が悪い場合の対処
+                            if len(answer) < 50:  # 短すぎる場合は再試行
+                                st.warning("🔄 より詳細な回答を要求して再試行します...")
+                                # ペイロードを修正して再送信
+                                enhanced_payload = payload.copy()
+                                enhanced_payload["query"] = f"以下の質問により詳しく日本語で回答してください：{user_input}"
+                                try:
+                                    retry_res = call_dify(enhanced_payload)
+                                    if retry_res.status_code == 200:
+                                        retry_rj = retry_res.json()
+                                        retry_answer = retry_rj.get("answer", "")
+                                        retry_valid, _ = validate_response_quality(retry_answer)
+                                        if retry_valid and len(retry_answer) > len(answer):
+                                            answer = retry_answer
+                                            rj = retry_rj
+                                            st.success("✅ 再試行により改善された回答を取得しました")
+                                except Exception as retry_error:
+                                    st.warning(f"再試行中にエラーが発生: {retry_error}")
+                        
+                        # テキストクリーニング
+                        answer = clean_response_text(answer)
+                        
                         # 新規会話IDが発行されたら保存
                         new_cid = rj.get("conversation_id")
                         if new_cid and not st.session_state.cid:
@@ -1218,16 +1323,36 @@ elif st.session_state.page == "chat":
                     st.markdown(answer)
 
             except requests.exceptions.HTTPError as e:
-                # エラーメッセージ本文をそのまま表示（原因の特定に有効）
+                # エラーレスポンスの詳細分析
                 body_text = getattr(e.response, "text", "(レスポンスボディ取得不可)")
-                st.error(f"⚠️ APIリクエストでHTTPエラーが発生しました (ステータスコード: {e.response.status_code})\n\n```\n{body_text}\n```")
-                answer = f"⚠️ APIリクエストでHTTPエラーが発生しました (ステータスコード: {e.response.status_code})\n\n```\n{body_text}\n```"
+                status_code = getattr(e.response, "status_code", "不明")
+                
+                # 多人数利用時によくあるエラーの対処
+                if status_code == 429:  # Too Many Requests
+                    st.error("⚠️ 現在多くのユーザーがシステムを利用しています。少し待ってから再度お試しください。")
+                    answer = "申し訳ございません。現在システムが混雑しているため、しばらくお待ちください。"
+                elif status_code == 503:  # Service Unavailable
+                    st.error("⚠️ サービスが一時的に利用できません。しばらく待ってから再度お試しください。")
+                    answer = "申し訳ございません。サービスが一時的に利用できません。"
+                elif status_code == 500:  # Internal Server Error
+                    st.error("⚠️ サーバー内部エラーが発生しました。")
+                    answer = "申し訳ございません。サーバーで問題が発生しました。"
+                else:
+                    st.error(f"⚠️ APIリクエストでエラーが発生しました (ステータスコード: {status_code})")
+                    answer = f"申し訳ございません。システムエラーが発生しました。（エラーコード: {status_code}）"
+                    
+            except requests.exceptions.Timeout:
+                st.error("⚠️ APIリクエストがタイムアウトしました。現在システムが混雑している可能性があります。")
+                answer = "申し訳ございません。レスポンスの取得に時間がかかっています。しばらく待ってから再度お試しください。"
+            except requests.exceptions.ConnectionError:
+                st.error("⚠️ ネットワーク接続エラーが発生しました。")
+                answer = "申し訳ございません。ネットワーク接続に問題があります。"
             except requests.exceptions.RequestException as e:
                 st.error(f"⚠️ APIリクエストで通信エラーが発生しました: {e}")
-                answer = f"⚠️ APIリクエストで通信エラーが発生しました: {e}"
+                answer = "申し訳ございません。通信エラーが発生しました。しばらく待ってから再度お試しください。"
             except Exception as e:
                 st.error(f"⚠️ 不明なエラーが発生しました: {e}")
-                answer = f"⚠️ 不明なエラーが発生しました: {e}"
+                answer = "申し訳ございません。予期しないエラーが発生しました。"
 
         # アシスタントの応答を保存
         if answer:
