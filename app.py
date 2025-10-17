@@ -9,6 +9,7 @@ from urllib.parse import urlencode
 import requests
 import pandas as pd
 import streamlit as st
+import re
 from openai import OpenAI
 from PIL import Image
 import io
@@ -18,6 +19,39 @@ import base64
 # Dify 設定
 # =========================
 DIFY_CHAT_URL = "https://api.dify.ai/v1/chat-messages"
+
+# レート制限用のグローバル変数
+if 'last_request_time' not in st.session_state:
+    st.session_state.last_request_time = {}
+    
+if 'request_count' not in st.session_state:
+    st.session_state.request_count = {}
+
+def check_rate_limit(api_key, max_requests_per_minute=20):
+    """簡易的なレート制限チェック"""
+    import time
+    current_time = time.time()
+    
+    # 1分前のタイムスタンプ
+    one_minute_ago = current_time - 60
+    
+    # このAPIキーの過去1分間のリクエスト数をカウント
+    if api_key not in st.session_state.request_count:
+        st.session_state.request_count[api_key] = []
+    
+    # 1分以上古いリクエストを削除
+    st.session_state.request_count[api_key] = [
+        req_time for req_time in st.session_state.request_count[api_key] 
+        if req_time > one_minute_ago
+    ]
+    
+    # 制限チェック
+    if len(st.session_state.request_count[api_key]) >= max_requests_per_minute:
+        return False, f"レート制限に達しました（{max_requests_per_minute}/分）。しばらく待ってから再試行してください。"
+    
+    # リクエストを記録
+    st.session_state.request_count[api_key].append(current_time)
+    return True, "OK"
 
 # =========================
 # OpenAI 設定
@@ -915,6 +949,15 @@ elif st.session_state.page == "chat":
                 status = "✅ 現在選択中" if persona == st.session_state.bot_type else ""
                 st.write(f"**{persona}**: `{cid or '(未発行)'}` {status}")
     
+    # システム負荷状況表示
+    if st.session_state.get('request_count'):
+        with st.expander("📊 システム状況", expanded=False):
+            current_time = time.time()
+            for api_desc, timestamps in st.session_state.request_count.items():
+                recent_requests = [t for t in timestamps if t > current_time - 60]
+                status_color = "🟢" if len(recent_requests) < 15 else "🟡" if len(recent_requests) < 20 else "🔴"
+                st.write(f"{status_color} **API使用状況**: {len(recent_requests)}/20 requests/分")
+    
     st.info(f"会話ID: `{cid_show}`")
     
     # 多人数利用時の注意メッセージ
@@ -1243,6 +1286,16 @@ elif st.session_state.page == "chat":
 
         with st.chat_message(st.session_state.bot_type, avatar=assistant_avatar):
             answer = ""
+            
+            # レート制限チェック
+            api_key = PERSONA_API_KEYS.get(st.session_state.bot_type)
+            if api_key:
+                rate_ok, rate_message = check_rate_limit(api_key, max_requests_per_minute=20)
+                if not rate_ok:
+                    st.error(rate_message)
+                    st.info("💡 ヒント: 少し時間をおいてから再度お試しください。")
+                    st.stop()
+            
             try:
                 with st.spinner("AIが応答を生成中です..."):
                     res = call_dify(payload)
