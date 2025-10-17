@@ -199,6 +199,174 @@ def clean_response_text(text):
     text = re.sub(r'[^\u0020-\u007E\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FAF\uFF01-\uFF60\n\r\t]', '', text)
     
     return text.strip()
+
+def diagnose_dify_configuration():
+    """Dify設定の診断を実行"""
+    st.markdown("### 🔍 Dify設定診断結果")
+    
+    # 1. APIキー情報の分析
+    st.markdown("#### 📋 APIキー設定状況")
+    
+    api_keys_info = {}
+    duplicates = {}
+    
+    for persona_name, raw_keys in PERSONA_API_KEYS.items():
+        if isinstance(raw_keys, str):
+            keys = [raw_keys]
+        else:
+            keys = raw_keys if raw_keys else []
+        
+        api_keys_info[persona_name] = keys
+        
+        for key in keys:
+            if key in duplicates:
+                duplicates[key].append(persona_name)
+            else:
+                duplicates[key] = [persona_name]
+    
+    # APIキー情報を表示
+    for persona_name, keys in api_keys_info.items():
+        with st.expander(f"🤖 {persona_name}", expanded=True):
+            if keys:
+                for i, key in enumerate(keys):
+                    key_display = f"...{key[-8:]}" if len(key) > 8 else key
+                    is_duplicate = len(duplicates.get(key, [])) > 1
+                    
+                    if is_duplicate:
+                        st.warning(f"⚠️ APIキー{i+1}: `{key_display}` - **重複検出**")
+                        st.caption(f"使用ペルソナ: {', '.join(duplicates[key])}")
+                    else:
+                        st.success(f"✅ APIキー{i+1}: `{key_display}` - **独立**")
+                
+                # キー数の評価
+                if len(keys) == 1:
+                    st.info("💡 **推奨**: 負荷分散のため複数キー設定を検討")
+                else:
+                    st.success(f"🔄 **負荷分散対応**: {len(keys)}個のキーで分散可能")
+            else:
+                st.error("❌ APIキーが設定されていません")
+    
+    # 2. 重複状況のサマリー
+    st.markdown("#### 🔍 設定状況サマリー")
+    
+    total_personas = len(PERSONA_API_KEYS)
+    total_unique_keys = len([key for keys in duplicates.values() if len(keys) == 1])
+    total_duplicated_keys = len([key for keys in duplicates.values() if len(keys) > 1])
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.metric("ペルソナ数", total_personas)
+    
+    with col2:
+        st.metric("独立APIキー数", total_unique_keys, delta=f"+{total_unique_keys} 良好")
+    
+    with col3:
+        st.metric("重複APIキー数", total_duplicated_keys, delta=f"-{total_duplicated_keys} 要改善" if total_duplicated_keys > 0 else "0 良好")
+    
+    # 3. 推奨事項
+    st.markdown("#### 💡 推奨事項")
+    
+    if total_duplicated_keys > 0:
+        st.error("⚠️ **重要**: APIキーの重複が検出されました")
+        st.markdown("""
+        **問題**: 複数のペルソナが同じAPIキーを使用すると：
+        - レート制限が早期に発生
+        - 会話IDの競合リスク
+        - 負荷集中による不安定性
+        
+        **解決策**: 各ペルソナに独立したAPIキーを設定
+        """)
+    else:
+        st.success("✅ **良好**: すべてのペルソナが独立したAPIキーを使用")
+    
+    # 4. 設定改善案
+    if total_duplicated_keys > 0:
+        st.markdown("#### 🛠️ 設定改善案")
+        
+        st.code(f"""
+# Streamlit Secrets設定例（推奨）
+PERSONA_1_KEY = "app-xxxxx1"  # ひらめ１号_g1専用
+PERSONA_2_KEY = "app-xxxxx2"  # ひらめ１号_g2専用  
+PERSONA_3_KEY = "app-xxxxx3"  # ひらめ１号_g3専用
+
+# さらに負荷分散する場合
+PERSONA_1_KEY = "app-xxxxx1a,app-xxxxx1b"  # カンマ区切りで複数
+        """, language="toml")
+    
+    # 5. Dify側確認手順
+    st.markdown("#### 🔗 Dify側確認手順")
+    
+    st.markdown("""
+    **各APIキーがどのDifyアプリに対応しているかを確認する方法:**
+    
+    1. **Dify Cloud (https://cloud.dify.ai/) にログイン**
+    2. **各アプリの設定を確認**:
+       - アプリ選択 → Settings → API Access
+       - API Key の値をメモ
+    3. **現在の設定と照合**:
+       - 上記診断結果と比較
+       - 重複や未使用キーを特定
+    """)
+    
+    # 6. 実時間テスト（オプション）
+    st.markdown("#### 🧪 実時間接続テスト（オプション）")
+    
+    if st.button("🔬 各APIキーの応答テスト実行", key="test_api_keys"):
+        test_api_keys_connectivity()
+
+def test_api_keys_connectivity():
+    """各APIキーの接続テストを実行"""
+    st.markdown("##### 🧪 接続テスト結果")
+    
+    test_message = "こんにちは。接続テストです。"
+    
+    for persona_name, raw_keys in PERSONA_API_KEYS.items():
+        with st.expander(f"🧪 {persona_name} テスト結果", expanded=True):
+            if isinstance(raw_keys, str):
+                keys = [raw_keys]
+            else:
+                keys = raw_keys if raw_keys else []
+            
+            for i, api_key in enumerate(keys):
+                key_display = f"...{api_key[-8:]}" if len(api_key) > 8 else api_key
+                
+                try:
+                    with st.spinner(f"APIキー{i+1}をテスト中..."):
+                        # テスト用ペイロード
+                        test_payload = {
+                            "inputs": {},
+                            "query": test_message,
+                            "response_mode": "blocking",
+                            "user": "test_user"
+                        }
+                        
+                        headers = {
+                            "Authorization": f"Bearer {api_key}",
+                            "Content-Type": "application/json"
+                        }
+                        
+                        response = requests.post(
+                            DIFY_CHAT_URL, 
+                            headers=headers, 
+                            json=test_payload, 
+                            timeout=10
+                        )
+                        
+                        if response.status_code == 200:
+                            data = response.json()
+                            answer = data.get("answer", "")[:50] + "..." if len(data.get("answer", "")) > 50 else data.get("answer", "")
+                            st.success(f"✅ APIキー{i+1} (`{key_display}`): 接続成功")
+                            st.caption(f"応答: {answer}")
+                        else:
+                            st.error(f"❌ APIキー{i+1} (`{key_display}`): HTTP {response.status_code}")
+                            st.caption(f"エラー: {response.text[:100]}...")
+                            
+                except requests.exceptions.Timeout:
+                    st.warning(f"⏱️ APIキー{i+1} (`{key_display}`): タイムアウト")
+                except Exception as e:
+                    st.error(f"❌ APIキー{i+1} (`{key_display}`): {str(e)[:100]}...")
+
 def should_generate_image(user_input, bot_response):
     """ユーザーの入力に画像生成の指示が含まれているかチェック"""
     image_keywords = [
@@ -834,6 +1002,10 @@ if st.session_state.page == "login":
                 st.markdown("### ⚡ 負荷分散設定（オプション）")
                 st.info("🔄 **複数APIキー設定**:\n`PERSONA_1_KEY`に複数キーをカンマ区切りで設定\n例: `key1,key2,key3`")
                 st.info("📊 **効果**: 負荷分散により安定性向上・レート制限回避")
+                
+                st.markdown("### 🔍 Dify設定診断")
+                if st.button("📊 現在のDify設定を診断", key="diagnose_dify_config"):
+                    diagnose_dify_configuration()
                 
                 # API接続テスト
                 st.markdown("### 🔍 API接続テスト")
