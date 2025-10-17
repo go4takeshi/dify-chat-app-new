@@ -73,14 +73,23 @@ PERSONA_NAMES = [
 
 
 def get_persona_api_keys():
-    """SecretsからAPIキーを読み込む（トップレベル/ネスト両対応 & フォールバック）"""
+    """SecretsからAPIキーを読み込む（複数キー負荷分散対応）"""
     keys = {}
 
     # 1) まずはトップレベル（従来）
     for i, name in enumerate(PERSONA_NAMES):
-        k = st.secrets.get(f"PERSONA_{i+1}_KEY")
-        if k:
-            keys[name] = k
+        primary_key = st.secrets.get(f"PERSONA_{i+1}_KEY")
+        if primary_key:
+            # 複数キーをサポート（カンマ区切りまたは配列）
+            if isinstance(primary_key, str) and ',' in primary_key:
+                # カンマ区切りの場合
+                keys[name] = [k.strip() for k in primary_key.split(',') if k.strip()]
+            elif isinstance(primary_key, list):
+                # リスト形式の場合
+                keys[name] = primary_key
+            else:
+                # 単一キーの場合
+                keys[name] = [primary_key]
 
     # 2) 次に [persona_api_keys] テーブル
     if "persona_api_keys" in st.secrets:
@@ -98,6 +107,49 @@ def get_persona_api_keys():
                 keys[name] = generic
 
     return keys
+
+def select_best_api_key(persona_name, api_keys_list):
+    """負荷分散：最も負荷が少ないAPIキーを選択"""
+    if not api_keys_list or len(api_keys_list) == 0:
+        return None
+    
+    if len(api_keys_list) == 1:
+        return api_keys_list[0]
+    
+    # 各APIキーの負荷状況をチェック
+    key_loads = []
+    current_time = time.time()
+    one_minute_ago = current_time - 60
+    
+    for api_key in api_keys_list:
+        if api_key not in st.session_state.request_count:
+            st.session_state.request_count[api_key] = []
+        
+        # 過去1分間のリクエスト数
+        recent_requests = [
+            req_time for req_time in st.session_state.request_count[api_key]
+            if req_time > one_minute_ago
+        ]
+        key_loads.append((api_key, len(recent_requests)))
+    
+    # 最も負荷が少ないキーを選択
+    best_key = min(key_loads, key=lambda x: x[1])[0]
+    return best_key
+
+def get_api_key_with_failover(persona_name):
+    """フェイルオーバー付きAPIキー取得"""
+    raw_keys = PERSONA_API_KEYS.get(persona_name)
+    if not raw_keys:
+        return None
+    
+    # 文字列の場合はリストに変換
+    if isinstance(raw_keys, str):
+        api_keys_list = [raw_keys]
+    else:
+        api_keys_list = raw_keys
+    
+    # 負荷分散でベストなキーを選択
+    return select_best_api_key(persona_name, api_keys_list)
 
 PERSONA_API_KEYS = get_persona_api_keys()
 
@@ -779,6 +831,10 @@ if st.session_state.page == "login":
                 st.info("3️⃣ **Google Drive権限**:\nサービスアカウントが画像保存用フォルダを作成できます")
                 st.info("4️⃣ **依存関係**:\nrequirements.txtに`google-api-python-client>=2.100.0`が含まれています")
                 
+                st.markdown("### ⚡ 負荷分散設定（オプション）")
+                st.info("🔄 **複数APIキー設定**:\n`PERSONA_1_KEY`に複数キーをカンマ区切りで設定\n例: `key1,key2,key3`")
+                st.info("📊 **効果**: 負荷分散により安定性向上・レート制限回避")
+                
                 # API接続テスト
                 st.markdown("### 🔍 API接続テスト")
                 if st.button("Google Sheets API テスト"):
@@ -949,14 +1005,34 @@ elif st.session_state.page == "chat":
                 status = "✅ 現在選択中" if persona == st.session_state.bot_type else ""
                 st.write(f"**{persona}**: `{cid or '(未発行)'}` {status}")
     
-    # システム負荷状況表示
+    # システム負荷状況表示（複数APIキー対応）
     if st.session_state.get('request_count'):
-        with st.expander("📊 システム状況", expanded=False):
+        with st.expander("📊 システム負荷状況", expanded=False):
             current_time = time.time()
-            for api_desc, timestamps in st.session_state.request_count.items():
-                recent_requests = [t for t in timestamps if t > current_time - 60]
-                status_color = "🟢" if len(recent_requests) < 15 else "🟡" if len(recent_requests) < 20 else "🔴"
-                st.write(f"{status_color} **API使用状況**: {len(recent_requests)}/20 requests/分")
+            
+            # 現在のペルソナのAPIキー情報
+            raw_keys = PERSONA_API_KEYS.get(st.session_state.bot_type, [])
+            if isinstance(raw_keys, str):
+                api_keys_list = [raw_keys]
+            else:
+                api_keys_list = raw_keys if raw_keys else []
+            
+            if len(api_keys_list) > 1:
+                st.write(f"🔄 **負荷分散モード**: {len(api_keys_list)}個のAPIキーで分散中")
+                
+                for i, api_key in enumerate(api_keys_list):
+                    timestamps = st.session_state.request_count.get(api_key, [])
+                    recent_requests = [t for t in timestamps if t > current_time - 60]
+                    status_color = "🟢" if len(recent_requests) < 10 else "🟡" if len(recent_requests) < 15 else "🔴"
+                    key_suffix = api_key[-8:] if len(api_key) > 8 else api_key
+                    st.write(f"{status_color} **APIキー{i+1}** (...{key_suffix}): {len(recent_requests)}/20 requests/分")
+            else:
+                # 単一APIキーの場合
+                for api_key, timestamps in st.session_state.request_count.items():
+                    recent_requests = [t for t in timestamps if t > current_time - 60]
+                    status_color = "🟢" if len(recent_requests) < 15 else "🟡" if len(recent_requests) < 20 else "🔴"
+                    key_suffix = api_key[-8:] if len(api_key) > 8 else api_key
+                    st.write(f"{status_color} **API使用状況** (...{key_suffix}): {len(recent_requests)}/20 requests/分")
     
     st.info(f"会話ID: `{cid_show}`")
     
@@ -1261,14 +1337,26 @@ elif st.session_state.page == "chat":
         if st.session_state.cid:
             payload["conversation_id"] = st.session_state.cid
 
-        def call_dify(pyld, retry_count=0):
-            """Dify APIを呼び出す（リトライ機能付き）"""
+        def call_dify(pyld, retry_count=0, force_api_key=None):
+            """Dify APIを呼び出す（負荷分散・リトライ機能付き）"""
             max_retries = 3
             base_timeout = 30  # 短縮
             timeout = base_timeout + (retry_count * 10)  # リトライ時はタイムアウトを延長
             
+            # APIキーを動的に選択（負荷分散）
+            if force_api_key:
+                current_api_key = force_api_key
+            else:
+                current_api_key = get_api_key_with_failover(st.session_state.bot_type)
+            
+            # ヘッダーを動的に更新
+            current_headers = {
+                "Authorization": f"Bearer {current_api_key}",
+                "Content-Type": "application/json"
+            }
+            
             try:
-                return requests.post(DIFY_CHAT_URL, headers=headers, json=pyld, timeout=timeout)
+                return requests.post(DIFY_CHAT_URL, headers=current_headers, json=pyld, timeout=timeout)
             except requests.exceptions.Timeout:
                 if retry_count < max_retries:
                     st.warning(f"⏱️ API応答がタイムアウトしました。再試行中... ({retry_count + 1}/{max_retries})")
@@ -1287,14 +1375,21 @@ elif st.session_state.page == "chat":
         with st.chat_message(st.session_state.bot_type, avatar=assistant_avatar):
             answer = ""
             
-            # レート制限チェック
-            api_key = PERSONA_API_KEYS.get(st.session_state.bot_type)
+            # 負荷分散でAPIキー選択
+            api_key = get_api_key_with_failover(st.session_state.bot_type)
             if api_key:
                 rate_ok, rate_message = check_rate_limit(api_key, max_requests_per_minute=20)
                 if not rate_ok:
                     st.error(rate_message)
                     st.info("💡 ヒント: 少し時間をおいてから再度お試しください。")
                     st.stop()
+                
+                # 負荷分散情報を表示（デバッグ用）
+                if st.session_state.get('show_load_balance_info', False):
+                    raw_keys = PERSONA_API_KEYS.get(st.session_state.bot_type)
+                    if isinstance(raw_keys, list) and len(raw_keys) > 1:
+                        key_suffix = api_key[-8:] if len(api_key) > 8 else api_key
+                        st.info(f"🔄 負荷分散: APIキー ...{key_suffix} を使用中")
             
             try:
                 with st.spinner("AIが応答を生成中です..."):
