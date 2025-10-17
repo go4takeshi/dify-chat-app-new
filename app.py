@@ -623,6 +623,7 @@ st.set_page_config(page_title="ひらめ１号との対話", layout="centered")
 def init_session_state():
     st.session_state.page = "login"
     st.session_state.cid = ""
+    st.session_state.persona_cids = {}  # ペルソナごとの会話ID管理
     st.session_state.messages = []
     st.session_state.bot_type = ""
     st.session_state.user_avatar_data = None
@@ -631,14 +632,40 @@ def init_session_state():
 if "page" not in st.session_state:
     init_session_state()
 
+# ペルソナごとの会話ID管理の初期化
+if "persona_cids" not in st.session_state:
+    st.session_state.persona_cids = {}
+
+# ペルソナごとの会話ID取得・設定のヘルパー関数
+def get_persona_cid(bot_type):
+    """指定されたペルソナの会話IDを取得"""
+    return st.session_state.persona_cids.get(bot_type, "")
+
+def set_persona_cid(bot_type, cid):
+    """指定されたペルソナの会話IDを設定"""
+    st.session_state.persona_cids[bot_type] = cid
+    # 現在のペルソナの場合は、メインの cid も更新
+    if bot_type == st.session_state.bot_type:
+        st.session_state.cid = cid
+
 # --- クエリパラメータから復元（共有リンク用） ---
 def restore_from_query_params():
     qp = st.query_params
     if qp.get("page") == "chat":
         st.session_state.page = "chat"
-        st.session_state.cid = qp.get("cid", "")
-        st.session_state.bot_type = qp.get("bot", "")
+        
+        # 指定されたペルソナと会話IDを設定
+        bot_type = qp.get("bot", "")
+        cid = qp.get("cid", "")
+        
+        if bot_type and bot_type in PERSONA_API_KEYS:
+            st.session_state.bot_type = bot_type
+            if cid:
+                set_persona_cid(bot_type, cid)
+                st.session_state.cid = cid
+        
         st.session_state.name = qp.get("name", "")
+        
         # ページ遷移時にクエリパラメータをクリアして、再読み込みループを防ぐ
         st.query_params.clear()
         st.rerun()
@@ -780,7 +807,18 @@ if st.session_state.page == "login":
         else:
             st.session_state.name = name.strip()
             st.session_state.bot_type = bot_type
-            st.session_state.cid = existing_cid.strip()
+            
+            # ペルソナごとの会話ID管理
+            if existing_cid.strip():
+                # 既存の会話IDが指定された場合
+                current_cid = existing_cid.strip()
+                set_persona_cid(bot_type, current_cid)
+                st.session_state.cid = current_cid
+            else:
+                # 新規会話の場合、そのペルソナ用の会話IDを取得
+                current_cid = get_persona_cid(bot_type)
+                st.session_state.cid = current_cid
+            
             if uploaded_file is not None:
                 st.session_state.user_avatar_data = uploaded_file.getvalue()
             else:
@@ -792,11 +830,54 @@ if st.session_state.page == "login":
 
 # ========== STEP 2: チャット画面 ==========
 elif st.session_state.page == "chat":
+    # ペルソナ切り替えセクション
+    with st.expander("🔄 ペルソナ切り替え", expanded=False):
+        col_persona, col_switch = st.columns([2, 1])
+        
+        with col_persona:
+            new_bot_type = st.selectbox(
+                "切り替え先ペルソナ",
+                list(PERSONA_API_KEYS.keys()),
+                index=(list(PERSONA_API_KEYS.keys()).index(st.session_state.bot_type)
+                       if st.session_state.bot_type in PERSONA_API_KEYS else 0),
+                key="persona_switcher"
+            )
+        
+        with col_switch:
+            st.write("")  # スペース調整
+            if st.button("🔄 切り替え", key="switch_persona"):
+                if new_bot_type != st.session_state.bot_type:
+                    # 現在の会話IDを現在のペルソナに保存
+                    set_persona_cid(st.session_state.bot_type, st.session_state.cid)
+                    
+                    # 新しいペルソナに切り替え
+                    st.session_state.bot_type = new_bot_type
+                    
+                    # 新しいペルソナの会話IDを復元
+                    new_cid = get_persona_cid(new_bot_type)
+                    st.session_state.cid = new_cid
+                    
+                    # チャット履歴をクリア（ペルソナが変わるため）
+                    st.session_state.messages = []
+                    
+                    st.success(f"'{new_bot_type}'に切り替えました。")
+                    st.rerun()
+                else:
+                    st.info("既に選択されているペルソナです。")
+
     st.markdown(f"#### 💬 {st.session_state.bot_type}")
     st.caption("同じ会話IDを共有すれば、複数人で同じ会話に参加できます。")
 
     # --- 共有リンク表示 ---
     cid_show = st.session_state.cid or "(未発行：最初の発話で採番)"
+    
+    # ペルソナごとの会話ID状況を表示
+    if st.session_state.persona_cids:
+        with st.expander("🔄 ペルソナ別会話ID状況", expanded=False):
+            for persona, cid in st.session_state.persona_cids.items():
+                status = "✅ 現在選択中" if persona == st.session_state.bot_type else ""
+                st.write(f"**{persona}**: `{cid or '(未発行)'}` {status}")
+    
     st.info(f"会話ID: `{cid_show}`")
     if st.session_state.cid:
         params = {
@@ -896,44 +977,6 @@ elif st.session_state.page == "chat":
                             st.session_state.generated_image_style = style_options[selected_style]
                             st.session_state.generated_image_size = selected_size
                             st.success("✅ 画像生成完了！下に表示されます。")
-                            st.rerun()  # 画面を再描画して結果を表示
-
-                                
-                            
-                            with col_save:
-                                # Google Drive保存の条件をチェック
-                                has_gcp = st.secrets.get("gcp_service_account") is not None
-                                has_gsheet = st.secrets.get("gsheet_id") is not None
-                                
-                                if has_gcp and has_gsheet:
-                                    if st.button("💾 Drive保存", key="save_generated_image", use_container_width=True):
-                                        with st.spinner("保存中..."):
-                                            try:
-                                                image_id = generate_image_id()
-                                                drive_file_id, drive_link_or_error = save_image_to_drive(
-                                                    image_bytes, image_id, image_prompt,
-                                                    st.session_state.get("cid", "manual_generation")
-                                                )
-                                                
-                                                if drive_file_id:
-                                                    st.success("✅ 保存完了！")
-                                                    st.caption(f"ID: `{image_id}`")
-                                                    if drive_link_or_error:
-                                                        st.link_button("🔗 Drive表示", drive_link_or_error)
-                                                    
-                                                    # ログ記録
-                                                    save_log(
-                                                        st.session_state.get("cid", "manual_generation"),
-                                                        "manual_image_generation", "system", "image_save",
-                                                        f"手動画像生成: {image_content[:100]}...",
-                                                        image_id, drive_file_id, drive_link_or_error or ""
-                                                    )
-                                                else:
-                                                    st.error(f"❌ 保存失敗: {drive_link_or_error}")
-                                            except Exception as e:
-                                                st.error(f"❌ 保存エラー: {e}")
-                                else:
-                                    st.caption("� Drive保存には認証設定が必要")
                         else:
                             st.error("❌ 画像生成に失敗しました")
             
@@ -1153,6 +1196,8 @@ elif st.session_state.page == "chat":
                         new_cid = rj.get("conversation_id")
                         if new_cid and not st.session_state.cid:
                             st.session_state.cid = new_cid
+                            # ペルソナごとの会話ID保存
+                            set_persona_cid(st.session_state.bot_type, new_cid)
                             
                     except (json.JSONDecodeError, ValueError):
                         # JSON形式でない場合はテキストとして処理
@@ -1164,6 +1209,8 @@ elif st.session_state.page == "chat":
                         cid_match = re.search(r'conversation_id:\s*([a-zA-Z0-9\-_]+)', answer)
                         if cid_match and not st.session_state.cid:
                             st.session_state.cid = cid_match.group(1)
+                            # ペルソナごとの会話ID保存
+                            set_persona_cid(st.session_state.bot_type, cid_match.group(1))
                             # 会話IDが含まれている場合は、その部分を除去
                             answer = re.sub(r'conversation_id:\s*[a-zA-Z0-9\-_]+\s*', '', answer).strip()
 
@@ -1202,10 +1249,12 @@ elif st.session_state.page == "chat":
 
     col1, col2 = st.columns(2)
     if col1.button("新しい会話を始める"):
-        # 現在のユーザー名とボットタイプは維持しつつ、会話IDとメッセージをリセット
+        # 現在のペルソナの会話IDのみをリセット（他のペルソナの会話IDは保持）
+        current_bot_type = st.session_state.bot_type
+        set_persona_cid(current_bot_type, "")  # 現在のペルソナの会話IDをクリア
         st.session_state.cid = ""
         st.session_state.messages = []
-        st.success("新しい会話を開始します。")
+        st.success(f"'{current_bot_type}'の新しい会話を開始します。")
         time.sleep(1)  # メッセージ表示のためのウェイト
         st.rerun()
 
